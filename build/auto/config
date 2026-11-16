@@ -1,0 +1,29 @@
+#!/bin/sh
+# LiteLink OS - live-build configuration. Run via `make iso` (or `lb config` in build/).
+# Note: no "components" on the kernel line. That would run live-config at boot,
+# which replaces our tty1 autologin with its own "user" account. User, hostname
+# and autologin are baked into the image by hooks/includes instead.
+# "persistence persistence-label=litelink-usb": if a partition labelled
+# litelink-usb exists (USB stick; installed disks use litelink-data), live-boot restores the
+# settings folders listed in its persistence.conf. Without one, boots clean.
+set -e
+
+lb config noauto \
+  --distribution trixie \
+  --archive-areas "main contrib non-free non-free-firmware" \
+  --mirror-bootstrap "http://deb.debian.org/debian" \
+  --mirror-binary "http://deb.debian.org/debian" \
+  --debian-installer none \
+  --apt-recommends false \
+  --apt-indices false \
+  --debootstrap-options "--variant=minbase" \
+  --firmware-chroot false \
+  --firmware-binary false \
+  --binary-images iso-hybrid \
+  --bootloaders "grub-efi,syslinux" \
+  --bootappend-live "boot=live persistence persistence-label=litelink-usb quiet splash loglevel=3 rd.systemd.show_status=false systemd.show_status=false rd.udev.log_level=3 udev.log_level=3 vt.global_cursor_default=0" \
+  --iso-application "LiteLink OS" \
+  --iso-volume "LiteLink" \
+  --iso-publisher "LiteLink OS; https://github.com/ibnsultan/LiteLink-OS" \
+  --memtest none \
+  "${@}"

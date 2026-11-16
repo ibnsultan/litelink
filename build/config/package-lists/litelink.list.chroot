@@ -1,0 +1,102 @@
+# LiteLink OS - Phase 1 package list.
+# The kernel (linux-image-amd64) is added by live-build itself.
+# Recommends are off, so every runtime dependency must be listed here.
+
+# Live system + init
+live-boot
+systemd-sysv
+libpam-systemd
+dbus
+sudo
+procps
+iproute2
+less
+# Clock: NTP sync (Debian pool by default). Without it the clock is whatever
+# the hardware RTC says, which breaks TLS, RDP certificates and apt.
+systemd-timesyncd
+# Hardware diagnostics (lspci, lsusb); also used by Settings > Diagnostics later
+pciutils
+usbutils
+# Installer + settings storage (litelink-storage): partitioning, filesystems,
+# and GRUB for EFI on the installed disk (minbase lacks e2fsprogs and grub-install)
+gdisk
+fdisk
+parted
+dosfstools
+e2fsprogs
+grub2-common
+grub-efi-amd64-bin
+# Own hostname always resolves (live-build resets /etc/hosts; without this
+# sudo and startx/xauth stall on name lookups and delay the desktop)
+libnss-myhostname
+
+# Networking (wpasupplicant is a Recommends of NetworkManager, needed for Wi-Fi)
+network-manager
+wpasupplicant
+wireless-regdb
+
+# Firmware for thin clients in general (Dell Wyse, HP t-series, IGEL, Fujitsu,
+# mini PCs). Curated, not the full firmware set (sizes in docs/sizes.md).
+# Wi-Fi covers Intel, Realtek, Broadcom, Qualcomm Atheros, MediaTek and
+# Marvell; NVIDIA graphics is left out.
+firmware-intel-graphics
+firmware-intel-misc
+# Intel audio DSP firmware (e.g. Cherry Trail SST: intel/fw_sst_22a8.bin on
+# the Wyse 3040) + ALSA routing profiles those audio drivers need
+firmware-intel-sound
+alsa-ucm-conf
+firmware-amd-graphics
+firmware-realtek
+firmware-iwlwifi
+firmware-brcm80211
+firmware-atheros
+firmware-mediatek
+firmware-libertas
+firmware-misc-nonfree
+intel-microcode
+amd64-microcode
+
+# X11 (modesetting driver ships in xserver-xorg-core)
+xserver-xorg-core
+xserver-xorg-input-libinput
+xserver-xorg-video-fbdev
+xinit
+xauth
+x11-xserver-utils
+
+# Window manager
+openbox
+# Paints the splash's resting frame as X's first image (seamless handover)
+hsetroot
+
+# RDP client
+freerdp3-x11
+
+# Audio
+pipewire-pulse
+wireplumber
+
+# Bluetooth: BlueZ stack, PipeWire's Bluetooth audio plugin (headsets),
+# rfkill to unblock radios. Paired from Settings > Bluetooth.
+bluez
+libspa-0.2-bluetooth
+rfkill
+
+# Fonts: Inter is the UI face (ThinOS-style clean sans); DejaVu is the fallback
+fonts-inter
+fonts-dejavu-core
+
+# SVG icon loading for GTK (line icons in the shell)
+librsvg2-common
+
+# Shell app runtime (Python + GTK 3; cairo draws the wallpaper)
+python3-gi
+python3-gi-cairo
+gir1.2-gtk-3.0
+
+# Boot splash: script theme in /usr/share/plymouth/themes/litelink.
+# Text is pre-rendered to PNG (Inter), so plymouth-label isn't needed.
+plymouth
+
+# Phase 1 debugging only: remove before release
+xterm

@@ -1,0 +1,3 @@
+# LiteLink OS - Openbox autostart.
+# The LiteLink shell is the desktop; restart it if it ever exits.
+(while true; do /usr/local/bin/litelink-shell >>/tmp/litelink-shell.log 2>&1; sleep 1; done) &

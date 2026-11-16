@@ -1,0 +1,52 @@
+#!/bin/sh
+# Create the auto-login user and set basic system identity.
+set -e
+
+if ! id litelink >/dev/null 2>&1; then
+    useradd --create-home --shell /bin/bash \
+        --groups audio,video,input,netdev,sudo litelink
+fi
+passwd --delete litelink
+
+# Phase 1 debugging only: passwordless sudo. Remove before release.
+echo 'litelink ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/litelink
+chmod 0440 /etc/sudoers.d/litelink
+
+chmod 0755 /usr/local/bin/litelink-shell /usr/lib/litelink/shell/main.py
+
+# Bluetooth: the bluetooth group may talk to BlueZ over D-Bus.
+getent group bluetooth >/dev/null && usermod -aG bluetooth litelink
+systemctl enable bluetooth.service
+
+# What the shell itself needs root for (kept when the debug rule above goes).
+cat > /etc/sudoers.d/litelink-shell <<'EOF'
+litelink ALL=(root) NOPASSWD: /usr/bin/systemctl poweroff, /usr/bin/systemctl reboot, /usr/bin/nmcli, /usr/sbin/rfkill, /usr/bin/timedatectl, /usr/local/sbin/litelink-state, /usr/local/sbin/litelink-storage
+EOF
+chmod 0755 /usr/local/sbin/litelink-state /usr/local/sbin/litelink-storage /usr/local/sbin/litelink-restore
+
+# Settings storage: folders restored from the litelink-data partition at boot
+# (see litelink-storage). They exist in the image so the bind mounts have
+# targets with the right owners.
+install -d -o litelink -g litelink /home/litelink/.config/litelink
+install -d -m 0755 /var/lib/litelink
+systemctl enable litelink-restore.service
+chmod 0440 /etc/sudoers.d/litelink-shell
+
+echo litelink > /etc/hostname
+cat > /etc/hosts <<'EOF'
+127.0.0.1	localhost
+127.0.1.1	litelink
+::1		localhost ip6-localhost ip6-loopback
+EOF
+
+# Rootless Xorg is started from tty1 via logind; no display manager.
+systemctl set-default multi-user.target
+systemctl enable NetworkManager.service
+# Keep the clock right (certificates, RDP, apt). Debian pool servers by default.
+systemctl enable systemd-timesyncd.service
+mkdir -p /etc/systemd/timesyncd.conf.d
+cat > /etc/systemd/timesyncd.conf.d/litelink.conf <<'EOF'
+[Time]
+NTP=0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org
+FallbackNTP=time.cloudflare.com time.google.com
+EOF

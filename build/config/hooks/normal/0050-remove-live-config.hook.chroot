@@ -1,0 +1,7 @@
+#!/bin/sh
+# live-build installs live-config by default. Its getty generator forces an
+# autologin for a "user" account on every boot, replacing ours. LiteLink sets
+# up its user, hostname and autologin when the image is built, so remove it.
+set -e
+apt-get purge -y live-config live-config-systemd || true
+rm -f /usr/lib/systemd/system-generators/live-config-getty-generator
