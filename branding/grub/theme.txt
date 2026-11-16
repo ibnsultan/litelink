@@ -1,0 +1,65 @@
+# LiteLink OS - GRUB theme (EFI boot menu of the ISO)
+desktop-image: "../splash.png"
+title-text: ""
+message-font: "Inter Regular 14"
+message-color: "#8B93A1"
+terminal-font: "Inter Regular 14"
+# Full-screen transparent terminal: no black rectangle while the kernel loads
+terminal-box: "../menu_*.png"
+terminal-left: "0"
+terminal-top: "0"
+terminal-width: "100%"
+terminal-height: "100%"
+terminal-border: "0"
+
+# Logo (kept as its own image so it never stretches)
++ image {
+    top = 50%-190
+    left = 50%-130
+    width = 260
+    height = 77
+    file = "../logo.png"
+}
+
++ boot_menu {
+    top = 50%-60
+    left = 50%-210
+    width = 420
+    height = 240
+    item_font = "Inter Regular 18"
+    selected_item_font = "Inter Medium 18"
+    item_color = "#A9B0BC"
+    selected_item_color = "#FFFFFF"
+    item_height = 40
+    item_padding = 18
+    item_spacing = 6
+    icon_width = 0
+    icon_height = 0
+    item_icon_space = 0
+    selected_item_pixmap_style = "../select_*.png"
+    menu_pixmap_style = "../menu_*.png"
+    scrollbar = false
+}
+
++ label {
+    id = "__timeout__"
+    top = 100%-72
+    left = 0
+    width = 100%
+    height = 20
+    align = "center"
+    font = "Inter Regular 14"
+    color = "#8B93A1"
+    text = "Starting in %d s"
+}
+
++ label {
+    top = 100%-44
+    left = 0
+    width = 100%
+    height = 20
+    align = "center"
+    font = "Inter Regular 14"
+    color = "#4A5160"
+    text = "Up/Down to choose  -  Enter to start  -  E to edit"
+}

@@ -1,0 +1,24 @@
+label live-@FLAVOUR@
+	menu label ^Start LiteLink OS
+	menu default
+	linux @LINUX@
+	initrd @INITRD@
+	append @APPEND_LIVE@
+
+label live-@FLAVOUR@-toram
+	menu label Start LiteLink OS (^run from RAM)
+	linux @LINUX@
+	initrd @INITRD@
+	append @APPEND_LIVE@ toram
+
+label live-@FLAVOUR@-install
+	menu label ^Install LiteLink OS
+	linux @LINUX@
+	initrd @INITRD@
+	append @APPEND_LIVE@ litelink.install
+
+label live-@FLAVOUR@-safe
+	menu label Start LiteLink OS (safe ^graphics)
+	linux @LINUX@
+	initrd @INITRD@
+	append @APPEND_LIVE@ nomodeset
