@@ -1,0 +1,82 @@
+# LiteLink OS - Plymouth splash.
+#
+# Boot:     motion 01 "Draw-on + signal" (assets/brand/.../LiteLink Motion.dc.html).
+#           The intro plays once, then the signal loop repeats until the
+#           desktop takes over.
+# Shutdown: motion 02 "Shimmer" plus a status line.
+#
+# Frames are pre-rendered PNGs (branding/motion/render_frames.py); the
+# @...@ counts are filled in by branding/render.sh.
+
+FPS = @FPS@;
+N_INTRO = @BOOT_INTRO@;
+N_LOOP = @BOOT_LOOP@;
+N_SHIM = @SHIMMER@;
+
+Window.SetBackgroundTopColor(0.063, 0.071, 0.090);    # #101217
+Window.SetBackgroundBottomColor(0.063, 0.071, 0.090);
+
+cx = Window.GetX() + Window.GetWidth() / 2;
+cy = Window.GetY() + Window.GetHeight() / 2;
+
+fun pad(i) {
+    if (i < 10) return "00" + i;
+    if (i < 100) return "0" + i;
+    return "" + i;
+}
+
+fun load(prefix, n) {
+    for (local.i = 0; local.i < n; local.i++)
+        local.frames[local.i] = Image(prefix + "-" + pad(local.i) + ".png");
+    return local.frames;
+}
+
+mode = Plymouth.GetMode();
+booting = !(mode == "shutdown" || mode == "reboot");
+
+if (booting) {
+    intro = load("boot-intro", N_INTRO);
+    loop = load("boot-loop", N_LOOP);
+    first = intro[0];
+} else {
+    loop = load("shimmer", N_SHIM);
+    first = loop[0];
+    if (mode == "reboot")
+        msg.image = Image("msg-reboot.png");
+    else
+        msg.image = Image("msg-shutdown.png");
+}
+
+anim.sprite = Sprite(first);
+anim.x = cx - first.GetWidth() / 2;
+anim.y = cy - first.GetHeight() / 2;
+anim.sprite.SetPosition(anim.x, anim.y, 10);
+
+if (!booting) {
+    msg.sprite = Sprite(msg.image);
+    msg.sprite.SetPosition(cx - msg.image.GetWidth() / 2, anim.y + first.GetHeight() + 28, 10);
+    msg.sprite.SetOpacity(0);
+}
+
+tick = 0;
+# Plymouth refreshes at 50 Hz; frames are rendered at FPS.
+step = 50 / FPS;
+
+fun refresh_callback() {
+    tick++;
+    f = Math.Int(tick / step);
+    if (booting) {
+        if (f < N_INTRO)
+            anim.sprite.SetImage(intro[f]);
+        else
+            anim.sprite.SetImage(loop[(f - N_INTRO) % N_LOOP]);
+    } else {
+        anim.sprite.SetImage(loop[f % N_SHIM]);
+        msg.sprite.SetOpacity(Math.Min(tick / 25, 1) * 0.9);
+    }
+}
+Plymouth.SetRefreshFunction(refresh_callback);
+
+# Nothing else on screen: no console messages, no prompts.
+fun message_callback(text) { }
+Plymouth.SetMessageFunction(message_callback);

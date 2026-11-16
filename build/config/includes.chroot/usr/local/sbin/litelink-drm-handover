@@ -1,0 +1,77 @@
+#!/usr/bin/python3
+"""LiteLink OS: hand the display from the boot splash to X.
+
+Run as root (via sudo) from ~/.xinitrc once X has painted its first frame.
+
+1. Quit Plymouth, keeping its last frame on screen, and wait until it's gone.
+2. Check that X is the DRM master. If X started a moment before Plymouth let
+   go of the display, X runs but never becomes master, so nothing it draws is
+   shown and the splash appears frozen forever.
+3. If so, switch to another VT and back: entering its VT makes X take master.
+   This costs at most a brief blink; normally it isn't needed at all.
+"""
+import fcntl
+import glob
+import os
+import subprocess
+import time
+
+VT_ACTIVATE, VT_WAITACTIVE, VT_GETSTATE = 0x5606, 0x5607, 0x5603
+
+
+def plymouth_running():
+    return subprocess.run(["pgrep", "-x", "plymouthd"], capture_output=True).returncode == 0
+
+
+def x_is_master():
+    """True if someone (X, or systemd-logind holding the device for rootless X)
+    is DRM master once Plymouth has gone; False if nobody is; None if unknown."""
+    if not glob.glob("/sys/kernel/debug/dri/*"):
+        subprocess.run(["mount", "-t", "debugfs", "none", "/sys/kernel/debug"], capture_output=True)
+    seen = False
+    for path in glob.glob("/sys/kernel/debug/dri/*/clients"):
+        try:
+            with open(path) as f:
+                for line in f:
+                    parts = line.split()
+                    # command tgid dev master a uid magic
+                    if len(parts) >= 4 and parts[0] in ("Xorg", "systemd-logind"):
+                        seen = True
+                        if parts[3] == "y":
+                            return True
+        except OSError:
+            continue
+    return False if seen else None
+
+
+def current_vt(fd):
+    import struct
+    buf = fcntl.ioctl(fd, VT_GETSTATE, b"\0" * 6)
+    return struct.unpack("HHH", buf)[0]
+
+
+def bounce_vt():
+    fd = os.open("/dev/tty0", os.O_RDWR)
+    try:
+        home = current_vt(fd)
+        away = 63 if home != 63 else 62
+        for vt in (away, home):
+            fcntl.ioctl(fd, VT_ACTIVATE, vt)
+            fcntl.ioctl(fd, VT_WAITACTIVE, vt)
+    finally:
+        os.close(fd)
+
+
+def main():
+    subprocess.run(["plymouth", "quit", "--retain-splash"], capture_output=True)
+    for _ in range(30):                  # up to 3 s for plymouthd to exit
+        if not plymouth_running():
+            break
+        time.sleep(0.1)
+    time.sleep(0.2)
+    if x_is_master() is False:
+        bounce_vt()
+
+
+if __name__ == "__main__":
+    main()

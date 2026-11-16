@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=LiteLink
+Description=LiteLink OS boot and shutdown splash
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/litelink
+ScriptFile=/usr/share/plymouth/themes/litelink/litelink.script

@@ -1,0 +1,62 @@
+#!/bin/sh
+# OS identity, boot splash and a silent console.
+set -e
+
+VERSION_ID=2.0
+VERSION="2.0 (Siamese)"
+
+# --- OS identity ---------------------------------------------------------
+cat > /usr/lib/os-release <<EOF
+PRETTY_NAME="LiteLink OS $VERSION"
+NAME="LiteLink OS"
+VERSION_ID="$VERSION_ID"
+VERSION="$VERSION"
+VERSION_CODENAME=siamese
+BUILD_ID=$(date +%Y%m%d)
+ID=litelink
+ID_LIKE=debian
+HOME_URL="https://github.com/ibnsultan/LiteLink-OS"
+SUPPORT_URL="https://github.com/ibnsultan/LiteLink-OS/issues"
+BUG_REPORT_URL="https://github.com/ibnsultan/LiteLink-OS/issues"
+DEBIAN_CODENAME=trixie
+EOF
+ln -sf ../usr/lib/os-release /etc/os-release
+
+printf 'LiteLink OS %s \\l\n\n' "$VERSION_ID" > /etc/issue
+printf 'LiteLink OS %s\n' "$VERSION_ID" > /etc/issue.net
+: > /etc/motd
+
+# --- Plymouth ------------------------------------------------------------
+mkdir -p /etc/plymouth
+cat > /etc/plymouth/plymouthd.conf <<'EOF'
+[Daemon]
+Theme=litelink
+ShowDelay=0
+DeviceTimeout=8
+EOF
+plymouth-set-default-theme litelink
+
+# Keep the splash up until the desktop has drawn. By default Plymouth quits
+# when boot reaches the login stage, leaving a black screen while X starts.
+# Instead the session deactivates it before startx and quits it once X has
+# painted the same frame; see /etc/skel/.bash_profile and .xinitrc.
+# Masking plymouth-quit-wait also drops getty@tty1's ordering on it.
+systemctl mask plymouth-quit.service plymouth-quit-wait.service
+cat > /etc/sudoers.d/litelink-plymouth <<'EOF'
+litelink ALL=(root) NOPASSWD: /usr/bin/plymouth deactivate, /usr/bin/plymouth quit --retain-splash, /usr/local/sbin/litelink-drm-handover
+EOF
+chmod 0440 /etc/sudoers.d/litelink-plymouth
+chmod 0755 /usr/local/sbin/litelink-drm-handover
+
+# Rebuild the initramfs so the theme is in it (live-build copies the
+# chroot's initrd into the ISO).
+update-initramfs -u -k all
+
+# --- Silent console ------------------------------------------------------
+# Only tty1 (the session) exists; no spare login consoles.
+mkdir -p /etc/systemd/logind.conf.d
+cat > /etc/systemd/logind.conf.d/litelink.conf <<'EOF'
+[Login]
+NAutoVTs=0
+ReserveVT=0
+EOF
