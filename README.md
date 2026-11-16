@@ -1,59 +1,191 @@
-# LiteLink - Your Lightweight Thin Client Operating System 🚀
+<img src="branding/logo/logo.png" alt="LiteLink OS" width="260">
 
-LiteLink is a customized Ubuntu-based operating system tailored to serve as an efficient thin client OS. Designed to be incredibly lightweight and minimalistic, LiteLink simplifies thin client computing without breaking the bank.
+LiteLink OS is a lightweight, Debian-based operating system for thin clients and small PCs.
+Its job is to connect users to remote Windows and Linux desktops. It runs live from a USB
+stick or installs to a small internal disk. Device setup, including networking, displays
+and installation, is handled within the OS, so it can be deployed and used without
+command-line knowledge.
 
-## Notice 📢
+Litelink version 2.0 (code named **Siamese**) is in active development. It is a rewrite on
+Debian 13 and replaces the original Ubuntu 18.04 image. alot of things are unfinished; please
+[report issues](https://github.com/ibnsultan/LiteLink-OS/issues) you run into.
 
-Please be advised that the current release represents an experimental version of the project. While I am passionate about its progress, I must share that development will proceed at a deliberate pace due to my commitment to a full-time job.
+## What it does
 
-I sincerely appreciate your understanding and patience. Rest assured, exciting developments are on the horizon. Stay informed, as something even more remarkable is in the works. Thank you for being part of this journey!
+- **Remote desktop connections.** Each saved connection appears as a tile on the desktop.
+  RDP is handled by FreeRDP 3, and LiteLink shows its own screens while connecting and when
+  a sign-in fails, a certificate isn't trusted or a session drops.
+- **Small footprint.** The ISO is about 760 MB. An installed system fits on a 2 GB Disk
+- **Quiet start-up.** The boot menu, splash, desktop and power screens use LiteLink's own
+  artwork instead of console text.
+- **Settings.** Wi-Fi and Ethernet (including static IP and DNS), Bluetooth, display
+  resolution (reverting automatically if a mode doesn't work), time zone and time servers.
+- **Runs from a USB stick.** Settings can be saved on the same stick, so connections and
+  Wi-Fi networks are kept across restarts.
 
-## Motivation and Inspiration 🌟
+## Hardware
 
-The main inspiration for creating LiteLink was the need for accessible, straightforward thin client solutions. Existing options either came at a steep price or were needlessly complex. LiteLink aims to fill this gap by providing a simple and cost-effective alternative.
+LiteLink targets x86-64 thin clients (Dell Wyse, HP t-series, IGEL, Fujitsu and similar)
 
-## System Requirements 📋
+|           |                                                                            |
+| --------- | -------------------------------------------------------------------------- |
+| Processor | 64-bit x86 (amd64)                                                         |
+| Memory    | 2 GB (tested)                                                              |
+| Storage   | 4 GB internal disk to install (eMMC, SSD or HDD) or it can be run from USB |
+| Firmware  | UEFI or legacy BIOS to run from USB. **Installing needs UEFI**       |
 
-- **Processor:** 64-bit
-- **Memory:** 1GB
-- **Storage:** 8GB
+So far it has been tested on a **Dell Wyse 3040** and in VirtualBox. Reports from other
+devices are welcome.
 
-## How to Use LiteLink 🛠️
+## Getting started
 
-1. **Download:** Obtain the LiteLink ISO file from the [Release Section](https://github.com/ibnsultan/LiteLink-OS/releases).
+### 1. Write the ISO to a USB stick
 
-2. **Create a Bootable Drive:** Use your preferred tool to create a bootable drive with the LiteLink ISO.
+Download the ISO from [Releases](https://github.com/ibnsultan/LiteLink-OS/releases), or [build it yourself](#building-from-source). Write it to a USB stick (2 GB or larger) with
+ a disk imaging utilitie like Rufus or Balena Etcher in **DD image mode**.
 
-3. **Installation:** Boot your device from the bootable drive and follow the installation prompts.
+Write the image as-is (DD mode). LiteLink keeps your settings in the free space on the stick,
+which only works when the stick holds the image itself rather than a copy of its files.
 
-4. **Auto-Login:** Upon startup, LiteLink will automatically log in with the "kiosk" user and prompt you for your RDP (Remote Desktop Protocol) credentials the first time.
+### 2. Boot it
 
-5. **Connect to RDP Server:** Enter your RDP server credentials, either by using the hostname.local or the IP address.
+Choose the USB stick in your device's boot menu. LiteLink's boot menu offers:
 
-6. **Automatic RDP Connection:** On subsequent power-ups, LiteLink will use the provided credentials to automatically establish an RDP connection with your server.
+| Entry                             | What it does                                              |
+| --------------------------------- | --------------------------------------------------------- |
+| **Start LiteLink OS**       | The normal start (default)                                |
+| Start LiteLink OS (run from RAM)  | Loads everything into memory, so the stick can be removed |
+| Start LiteLink OS (safe graphics) | For displays or GPUs that show a black screen             |
+| **Install LiteLink OS**     | Starts straight into the installer                        |
 
-7. **Modify Credentials:** To change your RDP credentials, open the terminal with `ctrl+alt+T`, execute the command `/home/kiosk/start_freerdp.sh -g`, and re-enter your new credentials.
+### 3. Keep your settings (optional)
 
-## Devices Tested On 🧪
+When running from a USB stick, LiteLink offers to **set up settings storage** the first time
+it starts. This adds a small partition in the stick's free space and leaves the rest of the
+stick unchanged. From the next start, your connections, Wi-Fi networks, Bluetooth devices and
+time settings are kept. You can also do this later in **Settings > Install**.
 
-LiteLink has been successfully tested on the following devices:
+### 4. Install to the internal disk
 
-- **Wyse 3040 Thin Client**
+Click **Install LiteLink** on the desktop, or open **Settings > Install**. The wizard has
+these steps:
 
-⚠️ **Disclaimer:** LiteLink is a new operating system and hasn't undergone extensive testing. While I have made my best efforts to ensure its functionality, there may be unforeseen issues. Please use LiteLink with caution and report any problems you encounter on the [Issues Section](https://github.com/ibnsultan/LiteLink-OS/issues).
+1. **Welcome**: the version and build being installed
+2. **Time & region**: time zone, and automatic or manual date and time
+3. **Features**: the mode (Standard; Kiosk is planned) and the connection types to install
+   (RDP is always included)
+4. **Storage**: the disk to install on
+5. **Confirm**: the erase warning, and whether to include maintenance tools. The button
+   becomes available after 10 seconds
+6. **Install** and **Finish**: remove the stick and restart
 
-🪲 **Issues so far Encountered**
+The chosen disk is **erased** and split into three partitions:
 
-- Network driver issues for old Macs [View Here](https://github.com/ibnsultan/LiteLink-OS/issues/1)
+| Partition         | Size             | Holds                                  |
+| ----------------- | ---------------- | -------------------------------------- |
+| EFI               | 256 MB           | The boot menu                          |
+| `LITELINK`      | 3 GB             | The operating system image (read-only) |
+| `litelink-data` | rest of the disk | Your settings                          |
 
-## Software and Credits 📦
+Because the system image is read-only, each restart returns the device to the same state,
+with only your settings carried over.
 
-LiteLink is built on the foundation of:
+## Using LiteLink
 
-- **Ubuntu Server 1804** by Canonical LTD
-- **FreeRDP** for seamless remote desktop connections
-- **Clonezilla** for image creation
+| Dock (left)          |                                                          |
+| -------------------- | -------------------------------------------------------- |
+| **Kite** (top) | Settings menu. **Add connection** is the last item |
+| Network              | Connection status and IP address, Wi-Fi on/off           |
+| Volume               | Output volume                                            |
+| Display              | Resolution                                               |
+| Power                | Lock, restart or shut down. Esc cancels                  |
 
-Feel free to explore LiteLink and contribute to its development. For more information, visit our [GitHub Repository]([#github-repository](https://github.com/ibnsultan/LiteLink-OS)).
+### Maintenance tools
 
-Let's simplify thin client computing together! 🌐
+When running from a USB stick, **Ctrl+Alt+T** opens a terminal, and `lspci`, `lsusb` and
+other hardware tools are available for troubleshooting. An installed device keeps them only if
+**Include maintenance tools** was ticked on the installer's Confirm page. Without them there
+is no terminal and no general root access; the shell keeps only the few root actions its
+settings need.
+
+## Building from source
+
+The ISO is built with Debian's [live-build](https://live-team.pages.debian.net/live-manual/)
+on a **Debian 13 (trixie)** machine or VM, as root.
+
+```bash
+sudo make deps
+```
+
+```bash
+sudo make iso
+```
+
+The image is written to `out/litelink-YYYYMMDD-amd64.iso`, and the build prints its size.
+
+| Target                              | Does                                                                            |
+| ----------------------------------- | ------------------------------------------------------------------------------- |
+| `make deps`                       | Installs the build tools (live-build, ImageMagick, GRUB, Inter font)            |
+| `make branding`                   | Renders the boot menu, splash animation and shell artwork from `branding/`    |
+| `make shell`                      | Copies the desktop shell from `shell/` into the image                         |
+| `make iso`                        | All of the above, then a clean live-build run                                   |
+| `make sizes`                      | Prints the ISO, root filesystem and squashfs sizes                              |
+| `make clean` / `make distclean` | Removes build output (`distclean` also clears the package cache and `out/`) |
+
+A full build takes about 20–30 minutes and needs around 10 GB of free disk space.
+
+### Repository layout
+
+```
+branding/          Logo, wallpaper and boot art; rendered by branding/render.sh
+  grub/ isolinux/  Boot menus (UEFI and legacy BIOS)
+  plymouth/        Boot splash theme
+  motion/          Turns the logo animation into frames (splash, connecting, installer)
+build/
+  auto/config      live-build options (Debian 13, minimal, kernel command line)
+  config/
+    package-lists/ Packages in the image (each one commented)
+    hooks/         Build-time setup: user, auto-login, sudo rules, OS identity
+    includes.chroot/  Files copied into the image, including the root helpers in
+                   usr/local/sbin (litelink-storage, litelink-state, litelink-restore)
+shell/             The desktop shell (Python 3 + GTK 3)
+  main.py
+  theme.css
+  litelink/        app, dock flyouts, settings, installer, connection screens
+docs/              Notes
+Makefile
+```
+
+### How it fits together
+
+- **Boot:** GRUB (UEFI) or isolinux (BIOS) loads the kernel with a silent console, and
+  Plymouth plays the kite animation. The user is logged in automatically on tty1, X starts
+  with Openbox, and the LiteLink shell opens. The splash hands over to the desktop without
+  a black frame.
+- **Shell:** a single full-screen GTK window for the desktop, dock, flyouts, settings and
+  connection screens. Connections are stored in `~/.config/litelink`.
+- **Root actions** (network, time, Bluetooth radio, storage and install) go through a few
+  small helpers that the shell may run with `sudo`. Nothing else gets root.
+- **Saved settings:** live-boot's persistence restores only chosen folders from the
+  settings partition: the shell's settings, NetworkManager connections, Bluetooth
+  pairings and `/var/lib/litelink` (time zone, time servers, install choices). Everything
+  else starts fresh on every boot.
+
+## Roadmap
+
+These appear greyed out in the interface until they're ready:
+
+- **Kiosk mode:** a single connection shown full screen, for shared devices
+- **Connection types:** VNC, remote workspaces (Citrix Workspace, VMware Horizon) and web kiosk
+- **Settings:** Remote connections, Keyboard & input, Sound, Admin lock, Diagnostics
+- Changing the mode and connection types after installation, from Settings
+
+## Credits
+
+Built on [Debian](https://www.debian.org/) 13 with
+[live-build](https://salsa.debian.org/live-team/live-build),
+[FreeRDP](https://www.freerdp.com/), [GTK](https://www.gtk.org/),
+[Openbox](http://openbox.org/), [Plymouth](https://gitlab.freedesktop.org/plymouth/plymouth),
+NetworkManager, PipeWire, BlueZ and the [Inter](https://rsms.me/inter/) typeface.
+
+Issues and ideas: [github.com/ibnsultan/LiteLink-OS/issues](https://github.com/ibnsultan/LiteLink-OS/issues)
