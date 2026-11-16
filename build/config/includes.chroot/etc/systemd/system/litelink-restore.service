@@ -1,0 +1,13 @@
+[Unit]
+Description=LiteLink: re-apply saved time zone and time servers
+DefaultDependencies=no
+After=local-fs.target
+Before=systemd-timesyncd.service sysinit.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/litelink-restore
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

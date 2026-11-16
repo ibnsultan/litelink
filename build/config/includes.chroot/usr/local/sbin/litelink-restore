@@ -1,0 +1,31 @@
+#!/bin/sh
+# LiteLink OS: re-apply saved system settings at boot (litelink-restore.service).
+# /var/lib/litelink is restored from the litelink-data partition by live-boot.
+STATE=/var/lib/litelink
+
+if [ -s "$STATE/timezone" ]; then
+    tz=$(cat "$STATE/timezone")
+    if [ -e "/usr/share/zoneinfo/$tz" ]; then
+        ln -sf "/usr/share/zoneinfo/$tz" /etc/localtime
+        echo "$tz" > /etc/timezone
+    fi
+fi
+
+if [ -s "$STATE/ntp.conf" ]; then
+    mkdir -p /etc/systemd/timesyncd.conf.d
+    cp "$STATE/ntp.conf" /etc/systemd/timesyncd.conf.d/litelink-custom.conf
+fi
+
+# Automatic time turned off: the clock was set by hand (kept by the RTC)
+if [ -e "$STATE/ntp-off" ]; then
+    systemctl mask --runtime systemd-timesyncd.service >/dev/null 2>&1 || true
+fi
+
+# Installed with maintenance tools off: no terminal shortcut and no
+# passwordless root. The USB stick (no install.json) always keeps them.
+if [ -s "$STATE/install.json" ] && grep -q '"maintenance": false' "$STATE/install.json"; then
+    rm -f /etc/sudoers.d/litelink
+    mkdir -p /run/litelink
+    touch /run/litelink/no-maintenance
+fi
+exit 0

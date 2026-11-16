@@ -1,0 +1,396 @@
+#!/usr/bin/python3
+"""LiteLink OS storage helper (run as root via sudo by the shell).
+
+  litelink-storage status            JSON: where we booted from, persistence state
+  litelink-storage disks             JSON: internal disks LiteLink can be installed on
+  litelink-storage usb-setup         add a litelink-usb settings partition to the boot USB stick
+  litelink-storage install DISK [--mode standard|kiosk] [--features rdp,vnc,workspaces,webkiosk]
+                                [--maintenance on|off]
+                                     install LiteLink on DISK (erases it); choices go to
+                                     state/install.json (RDP always included)
+
+Long operations print "PROGRESS <percent> <message>" lines and finish with
+"DONE" or "ERROR <message>".
+
+Layout written by install:
+  1  EFI            256 MB  FAT32  GRUB (LiteLink-branded, EFI, removable path)
+  2  LITELINK       3 GB    ext4   read-only OS image (/live: kernel, initrd, squashfs)
+  3  litelink-data  rest    ext4   settings only, restored at boot by live-boot
+"""
+import glob
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+MEDIUM = "/run/live/medium"
+DATA_LABEL = "litelink-data"         # installed disk (named by the installed GRUB)
+USB_LABEL = "litelink-usb"            # USB stick (named by the ISO boot menu). Separate so a USB
+                                      # stick never picks up an installed disk's settings.
+SYS_LABEL = "LITELINK"
+USER_UID = USER_GID = 1000
+MIN_DATA = 256 * 1024 * 1024          # smallest useful settings partition
+MIN_INSTALL = 4 * 1000 ** 3           # smallest disk we install on
+
+# What persists, as live-boot persistence.conf entries: directory -> folder on the partition
+PERSIST = [
+    ("/home/litelink/.config/litelink", "litelink"),       # connections, shell settings
+    ("/etc/NetworkManager/system-connections", "nm"),      # Wi-Fi and network settings
+    ("/var/lib/bluetooth", "bluetooth"),                   # paired devices
+    ("/var/lib/litelink", "state"),                        # time zone, time servers
+]
+
+BOOT_APPEND = ("boot=live live-media=/dev/disk/by-label/LITELINK persistence persistence-label=litelink-data "
+               "quiet splash loglevel=3 rd.systemd.show_status=false systemd.show_status=false "
+               "rd.udev.log_level=3 udev.log_level=3 vt.global_cursor_default=0")
+
+
+# ---------------------------------------------------------------- helpers
+def run(*cmd, input=None):
+    r = subprocess.run(cmd, capture_output=True, text=True, input=input)
+    if r.returncode != 0:
+        raise RuntimeError(f"{os.path.basename(cmd[0])}: {(r.stderr or r.stdout).strip()[:300]}")
+    return r.stdout
+
+
+def out(*cmd):
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def progress(pct, msg):
+    print(f"PROGRESS {int(pct)} {msg}", flush=True)
+
+
+def lsblk(*devs):
+    data = json.loads(out("lsblk", "-J", "-b", "-o",
+                          "NAME,PATH,SIZE,TYPE,TRAN,MODEL,RM,HOTPLUG,LABEL,FSTYPE,MOUNTPOINT,PKNAME",
+                          *devs) or '{"blockdevices": []}')
+    return data.get("blockdevices", [])
+
+
+def medium_disk():
+    """The disk the live system booted from, e.g. /dev/sdb (None for a CD)."""
+    src = out("findmnt", "-no", "SOURCE", MEDIUM)
+    if not src:
+        return None
+    parent = out("lsblk", "-no", "PKNAME", src)
+    return f"/dev/{parent.splitlines()[0]}" if parent else src
+
+
+def partition(disk, n):
+    name = os.path.basename(disk)
+    return f"{disk}p{n}" if name[-1].isdigit() else f"{disk}{n}"
+
+
+def persistence_active():
+    """live-boot mounts the partition it used under /run/live/persistence."""
+    for line in open("/proc/mounts"):
+        if line.split()[1].startswith("/run/live/persistence/"):
+            return True
+    return False
+
+
+def installed():
+    return "live-media=/dev/disk/by-label/LITELINK" in open("/proc/cmdline").read()
+
+
+def free_space(disk):
+    """Unpartitioned bytes at the end of the disk."""
+    # "Unpartitioned space /dev/sdb: 13.6 GiB, 14619246592 bytes, 28553216 sectors"
+    import re
+    m = re.search(r"(\d+) bytes", out("sfdisk", "-F", disk).split("\n", 1)[0])
+    return int(m.group(1)) if m else 0
+
+
+def wait_for(path, seconds=15):
+    for _ in range(seconds * 4):
+        if os.path.exists(path):
+            return
+        time.sleep(0.25)
+    raise RuntimeError(f"{path} did not appear")
+
+
+def write_persistence(root, copy_current=True):
+    """Lay out the settings partition mounted at root."""
+    with open(os.path.join(root, "persistence.conf"), "w") as f:
+        for target, src in PERSIST:
+            f.write(f"{target} bind,source={src}\n")
+    for target, src in PERSIST:
+        d = os.path.join(root, src)
+        os.makedirs(d, exist_ok=True)
+        if copy_current and os.path.isdir(target):
+            shutil.copytree(target, d, dirs_exist_ok=True, symlinks=True)
+    os.chmod(os.path.join(root, "nm"), 0o700)
+    os.chmod(os.path.join(root, "bluetooth"), 0o700)
+    for dirpath, dirs, files in os.walk(os.path.join(root, "litelink")):
+        for p in [dirpath] + [os.path.join(dirpath, x) for x in dirs + files]:
+            os.chown(p, USER_UID, USER_GID)
+
+
+class Mounted:
+    def __init__(self, dev, fstype=None):
+        self.dev, self.fstype, self.path = dev, fstype, tempfile.mkdtemp(prefix="litelink-")
+
+    def __enter__(self):
+        args = ["mount"] + (["-t", self.fstype] if self.fstype else []) + [self.dev, self.path]
+        run(*args)
+        return self.path
+
+    def __exit__(self, *exc):
+        subprocess.run(["sync"])
+        subprocess.run(["umount", self.path])
+        os.rmdir(self.path)
+
+
+# ---------------------------------------------------------------- commands
+def cmd_status():
+    disk = medium_disk()
+    info = {"installed": installed(), "persistence": persistence_active(), "medium_disk": disk,
+            "medium_model": "", "medium_size": 0, "medium_removable": False, "free_bytes": 0,
+            "can_setup_usb": False}
+    if disk and disk.startswith("/dev/") and not disk.startswith("/dev/sr"):
+        d = (lsblk(disk) or [{}])[0]
+        info.update(medium_model=(d.get("model") or "").strip(), medium_size=d.get("size") or 0,
+                    medium_removable=bool(d.get("rm") or d.get("hotplug") or d.get("tran") == "usb"))
+        info["free_bytes"] = free_space(disk)
+        info["can_setup_usb"] = (not info["installed"] and not info["persistence"]
+                                 and info["free_bytes"] >= MIN_DATA)
+    print(json.dumps(info))
+
+
+def cmd_disks():
+    skip = medium_disk()
+    result = []
+    for d in lsblk():
+        if d.get("type") != "disk" or d.get("path") == skip:
+            continue
+        if d.get("name", "").startswith(("loop", "sr", "zram", "ram")) or (d.get("size") or 0) < MIN_INSTALL:
+            continue
+        name = d.get("name", "")
+        kind = ("eMMC" if name.startswith("mmcblk") else "NVMe SSD" if name.startswith("nvme")
+                else "USB drive" if d.get("tran") == "usb" else "Disk")
+        result.append({"path": d["path"], "size": d.get("size") or 0, "model": (d.get("model") or "").strip(),
+                       "kind": kind, "removable": bool(d.get("rm"))})
+    print(json.dumps(result))
+
+
+def cmd_usb_setup():
+    if installed() or persistence_active():
+        raise RuntimeError("settings storage is already set up")
+    disk = medium_disk()
+    if not disk or disk.startswith("/dev/sr"):
+        raise RuntimeError("LiteLink isn't running from a USB stick")
+    if free_space(disk) < MIN_DATA:
+        raise RuntimeError("not enough free space on the USB stick (write the ISO in DD/image mode)")
+    progress(10, "Creating the settings partition")
+    before = {d["path"] for d in (lsblk(disk)[0].get("children") or [])}
+    run("sfdisk", "--append", "--no-reread", disk, input=",,L\n")
+    # The stick is in use, so the kernel can't re-read the whole table:
+    # register just the new partition (the last entry sfdisk reports).
+    last = out("sfdisk", "-d", disk).strip().splitlines()[-1].split(":")[0].strip()
+    num = "".join(ch for ch in last[len(disk):] if ch.isdigit())
+    if num:
+        subprocess.run(["partx", "-a", "--nr", f"{num}:{num}", disk], capture_output=True)
+    subprocess.run(["udevadm", "settle"])
+    after = None
+    for _ in range(40):
+        kids = {d["path"] for d in (lsblk(disk)[0].get("children") or [])}
+        new = kids - before
+        if new:
+            after = sorted(new)[-1]
+            break
+        time.sleep(0.25)
+    if not after:
+        raise RuntimeError("the new partition didn't appear")
+    progress(40, "Formatting")
+    run("mkfs.ext4", "-F", "-q", "-L", USB_LABEL, after)
+    progress(70, "Saving your current settings")
+    with Mounted(after, "ext4") as root:
+        write_persistence(root, copy_current=True)
+    progress(100, "Done")
+
+
+MODES = ("standard", "kiosk")
+FEATURES = ("rdp", "vnc", "workspaces", "webkiosk")
+
+
+def parse_install_args(args):
+    """install DISK [--mode standard|kiosk] [--features rdp,vnc,...] [--maintenance on|off]"""
+    opts = {"mode": "standard", "features": ["rdp"], "maintenance": False}
+    disk, i = None, 0
+    while i < len(args):
+        a = args[i]
+        if a in ("--mode", "--features", "--maintenance") and i + 1 < len(args):
+            v = args[i + 1]
+            if a == "--mode":
+                if v not in MODES:
+                    raise RuntimeError(f"unknown mode: {v}")
+                opts["mode"] = v
+            elif a == "--features":
+                feats = [f for f in v.split(",") if f]
+                bad = [f for f in feats if f not in FEATURES]
+                if bad:
+                    raise RuntimeError(f"unknown feature: {bad[0]}")
+                opts["features"] = ["rdp"] + [f for f in feats if f != "rdp"]   # RDP is always installed
+            else:
+                opts["maintenance"] = v == "on"
+            i += 2
+        elif disk is None:
+            disk, i = a, i + 1
+        else:
+            raise RuntimeError(f"unexpected argument: {a}")
+    if not disk:
+        raise RuntimeError("no disk given")
+    return disk, opts
+
+
+def write_install_choices(data_root, opts):
+    """Choices made in the installer, read at boot (litelink-restore) and by the
+    shell. Lives with the settings in state/ (= /var/lib/litelink)."""
+    state = os.path.join(data_root, "state")
+    os.makedirs(state, exist_ok=True)
+    with open(os.path.join(state, "install.json"), "w") as f:
+        json.dump(dict(opts, installed=time.strftime("%Y-%m-%d")), f, indent=1)
+    os.chmod(os.path.join(state, "install.json"), 0o644)
+
+
+def cmd_install(disk, opts=None):
+    opts = opts or {"mode": "standard", "features": ["rdp"], "maintenance": False}
+    if not disk.startswith("/dev/") or not os.path.exists(disk):
+        raise RuntimeError(f"no such disk: {disk}")
+    if disk == medium_disk():
+        raise RuntimeError("that's the disk LiteLink is running from")
+    if not os.path.isdir(os.path.join(MEDIUM, "live")):
+        raise RuntimeError("the LiteLink system files weren't found")
+
+    progress(2, "Preparing the disk")
+    for line in out("lsblk", "-nrpo", "NAME,MOUNTPOINT", disk).splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[1]:
+            subprocess.run(["umount", "-l", parts[1]])
+    run("wipefs", "-a", disk)
+    run("sgdisk", "--zap-all", disk)
+    run("sgdisk", "-n1:0:+256M", "-t1:ef00", "-c1:EFI",
+        "-n2:0:+3G", "-t2:8300", "-c2:LITELINK",
+        "-n3:0:0", "-t3:8300", "-c3:litelink-data", disk)
+    subprocess.run(["partprobe", disk])
+    subprocess.run(["udevadm", "settle"])
+    p1, p2, p3 = (partition(disk, n) for n in (1, 2, 3))
+    for p in (p1, p2, p3):
+        wait_for(p)
+
+    progress(8, "Formatting")
+    run("mkfs.vfat", "-F", "32", "-n", "LLEFI", p1)
+    run("mkfs.ext4", "-F", "-q", "-L", SYS_LABEL, p2)
+    run("mkfs.ext4", "-F", "-q", "-L", DATA_LABEL, p3)
+
+    # The OS image: kernel, initrd and the compressed root filesystem
+    src = os.path.join(MEDIUM, "live")
+    files = [f for f in ("vmlinuz", "initrd.img", "filesystem.squashfs") if os.path.exists(os.path.join(src, f))]
+    if len(files) != 3:
+        raise RuntimeError("the LiteLink system files are incomplete")
+    total = sum(os.path.getsize(os.path.join(src, f)) for f in files)
+    done = 0
+    with Mounted(p2, "ext4") as sysroot:
+        os.makedirs(os.path.join(sysroot, "live"))
+        for f in files:
+            with open(os.path.join(src, f), "rb") as fi, open(os.path.join(sysroot, "live", f), "wb") as fo:
+                while True:
+                    chunk = fi.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    fo.write(chunk)
+                    done += len(chunk)
+                    progress(12 + 70 * done / total, "Copying LiteLink OS")
+                fo.flush()
+                os.fsync(fo.fileno())
+
+    progress(84, "Installing the boot loader")
+    with Mounted(p1, "vfat") as efi:
+        boot = os.path.join(efi, "boot")
+        run("grub-install", "--target=x86_64-efi", f"--efi-directory={efi}", f"--boot-directory={boot}",
+            "--removable", "--no-nvram")
+        grubdir = os.path.join(boot, "grub")
+        medium_grub = os.path.join(MEDIUM, "boot", "grub")
+        # LiteLink look: fonts, background, logo, theme (from the boot medium)
+        for pattern in ("*.pf2", "*.png", "config.cfg", "theme.cfg"):
+            for f in glob.glob(os.path.join(medium_grub, pattern)):
+                shutil.copy(f, grubdir)
+        if os.path.isdir(os.path.join(medium_grub, "live-theme")):
+            shutil.copytree(os.path.join(medium_grub, "live-theme"), os.path.join(grubdir, "live-theme"),
+                            dirs_exist_ok=True)
+        with open(os.path.join(grubdir, "grub.cfg"), "w") as f:
+            f.write(GRUB_CFG.format(append=BOOT_APPEND))
+
+    progress(94, "Saving your current settings")
+    with Mounted(p3, "ext4") as data:
+        write_persistence(data, copy_current=True)
+        write_install_choices(data, opts)
+    subprocess.run(["sync"])
+    progress(100, "Done")
+
+
+GRUB_CFG = """# LiteLink OS (installed). The OS image is read-only on the LITELINK partition;
+# settings live on litelink-data.
+source /boot/grub/config.cfg
+
+menuentry "Start LiteLink OS" --hotkey=s {{
+	search --no-floppy --label LITELINK --set=root
+	linux	/live/vmlinuz {append}
+	initrd	/live/initrd.img
+}}
+
+menuentry "Start LiteLink OS (safe graphics)" --hotkey=g {{
+	search --no-floppy --label LITELINK --set=root
+	linux	/live/vmlinuz {append} nomodeset
+	initrd	/live/initrd.img
+}}
+
+submenu "Utilities" --hotkey=u {{
+	source /boot/grub/theme.cfg
+	if [ "${{grub_platform}}" = "efi" ]; then
+		menuentry "Firmware settings" --hotkey=f {{
+			fwsetup
+		}}
+	fi
+	menuentry "Restart" {{
+		reboot
+	}}
+	menuentry "Power off" {{
+		halt
+	}}
+}}
+"""
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__, file=sys.stderr)
+        return 2
+    cmd = sys.argv[1]
+    try:
+        if cmd == "status":
+            cmd_status()
+        elif cmd == "disks":
+            cmd_disks()
+        elif cmd == "usb-setup":
+            cmd_usb_setup()
+            print("DONE", flush=True)
+        elif cmd == "install" and len(sys.argv) >= 3:
+            cmd_install(*parse_install_args(sys.argv[2:]))
+            print("DONE", flush=True)
+        else:
+            print(__doc__, file=sys.stderr)
+            return 2
+    except Exception as e:  # noqa: BLE001 - every failure is reported to the UI
+        print(f"ERROR {e}", flush=True)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

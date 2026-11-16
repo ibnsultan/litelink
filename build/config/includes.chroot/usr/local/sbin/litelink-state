@@ -1,0 +1,48 @@
+#!/bin/sh
+# LiteLink OS: system settings that must survive a reboot (run as root via sudo).
+# They're applied now and saved in /var/lib/litelink, which lives on the
+# litelink-data partition when persistence is set up; litelink-restore
+# re-applies them at boot.
+#
+#   litelink-state timezone Africa/Dar_es_Salaam
+#   litelink-state auto-time on|off
+#   litelink-state ntp ntp1.example.com ntp2.example.com   (no servers = default pool)
+set -e
+STATE=/var/lib/litelink
+mkdir -p "$STATE"
+
+case "$1" in
+timezone)
+    tz="$2"
+    case "$tz" in ""|*..*|/*|*[!A-Za-z0-9/_+-]*) echo "invalid time zone" >&2; exit 2 ;; esac
+    [ -e "/usr/share/zoneinfo/$tz" ] || { echo "unknown time zone: $tz" >&2; exit 2; }
+    timedatectl set-timezone "$tz"
+    echo "$tz" > "$STATE/timezone"
+    ;;
+auto-time)
+    # on: keep the clock synced over the network; off: the clock is set by hand
+    case "$2" in
+    on)  rm -f "$STATE/ntp-off"; timedatectl set-ntp true ;;
+    off) touch "$STATE/ntp-off"; timedatectl set-ntp false ;;
+    *)   echo "usage: litelink-state auto-time on|off" >&2; exit 2 ;;
+    esac
+    ;;
+ntp)
+    shift
+    for s in "$@"; do
+        case "$s" in *[!A-Za-z0-9.:-]*|"") echo "invalid server: $s" >&2; exit 2 ;; esac
+    done
+    mkdir -p /etc/systemd/timesyncd.conf.d
+    if [ "$#" -gt 0 ]; then
+        printf '[Time]\nNTP=%s\n' "$*" > "$STATE/ntp.conf"
+        cp "$STATE/ntp.conf" /etc/systemd/timesyncd.conf.d/litelink-custom.conf
+    else
+        rm -f "$STATE/ntp.conf" /etc/systemd/timesyncd.conf.d/litelink-custom.conf
+    fi
+    systemctl restart systemd-timesyncd.service
+    ;;
+*)
+    echo "usage: litelink-state timezone ZONE | auto-time on|off | ntp [SERVER...]" >&2
+    exit 2
+    ;;
+esac
