@@ -1,0 +1,513 @@
+"""LiteLink shell: the full-screen desktop.
+
+One window holds everything. The wallpaper, dock and desktop icons form the
+base; flyouts, dialogs and system screens are layers stacked on top inside the
+same window, so the look never depends on the window manager.
+"""
+import math
+import os
+import subprocess
+import time
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+
+from . import system, ui  # noqa: E402
+from .config import Config  # noqa: E402
+
+# Sky wallpaper: (offset, colour) stops and soft cloud ellipses (cx, cy, rx, ry, alpha)
+SKY = [(0.0, "#1E4E9C"), (0.38, "#3D7ACC"), (0.72, "#8DB9EA"), (1.0, "#D6E7F8")]
+CLOUDS = [(0.78, 0.30, 420, 120, 0.55), (0.30, 0.72, 520, 140, 0.50), (0.62, 0.86, 360, 90, 0.45)]
+
+DOCK_STEP = 68  # dock item height + gap; used to line flyouts up with their button
+
+
+def _rgb(hex_):
+    h = hex_.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+
+
+_wall = {"src": None, "scaled": None, "size": None}
+
+
+def _wallpaper():
+    if _wall["src"] is None:
+        from gi.repository import GdkPixbuf
+        try:
+            _wall["src"] = GdkPixbuf.Pixbuf.new_from_file(os.path.join(ui.SHARE, "wallpaper.jpg"))
+        except GLib.Error:
+            _wall["src"] = False
+    return _wall["src"]
+
+
+def draw_sky(widget, cr):
+    """Wallpaper scaled to cover the screen; a drawn sky if the image is missing."""
+    w, h = widget.get_allocated_width(), widget.get_allocated_height()
+    src = _wallpaper()
+    if src:
+        from gi.repository import GdkPixbuf
+        if _wall["size"] != (w, h):
+            iw, ih = src.get_width(), src.get_height()
+            s = max(w / iw, h / ih)
+            _wall["scaled"] = src.scale_simple(max(1, round(iw * s)), max(1, round(ih * s)),
+                                               GdkPixbuf.InterpType.BILINEAR)
+            _wall["size"] = (w, h)
+        pb = _wall["scaled"]
+        Gdk.cairo_set_source_pixbuf(cr, pb, (w - pb.get_width()) / 2, (h - pb.get_height()) / 2)
+        cr.paint()
+        return False
+    import cairo
+    g = cairo.LinearGradient(0, 0, 0, h)
+    for off, col in SKY:
+        g.add_color_stop_rgb(off, *_rgb(col))
+    cr.set_source(g)
+    cr.paint()
+    for cx, cy, rx, ry, a in CLOUDS:
+        cr.save()
+        cr.translate(cx * w, cy * h)
+        cr.scale(rx, ry)
+        rg = cairo.RadialGradient(0, 0, 0, 0, 0, 1)
+        rg.add_color_stop_rgba(0, 1, 1, 1, a)
+        rg.add_color_stop_rgba(0.7, 1, 1, 1, 0)
+        cr.set_source(rg)
+        cr.arc(0, 0, 1, 0, 2 * math.pi)
+        cr.fill()
+        cr.restore()
+    return False
+
+
+class Shell(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="LiteLink")
+        ui.add_class(self, "litelink")
+        self.set_decorated(False)
+        self.cfg = Config()
+        self.session = None
+        self.layers = []          # stack of (container, kind, on_close)
+        self.flyout = None
+        self.flyout_name = None
+
+        self.root = Gtk.Overlay()
+        self.add(self.root)
+
+        sky = Gtk.DrawingArea()
+        sky.connect("draw", draw_sky)
+        self.root.add(sky)
+
+        base = Gtk.Box()
+        self.dock = self._build_dock()
+        base.pack_start(self.dock, False, False, 0)
+        self.desktop = Gtk.FlowBox(orientation=Gtk.Orientation.VERTICAL, selection_mode=Gtk.SelectionMode.NONE,
+                                   homogeneous=True, column_spacing=8, row_spacing=8,
+                                   valign=Gtk.Align.START, halign=Gtk.Align.START,
+                                   margin_top=24, margin_start=20, max_children_per_line=6)
+        base.pack_start(self.desktop, True, True, 0)
+        self.root.add_overlay(base)
+
+        self.clock = self._build_clock()
+        self.root.add_overlay(self.clock)
+
+        logo = ui.picture("logo.png", 112)
+        logo.set_halign(Gtk.Align.END)
+        logo.set_valign(Gtk.Align.END)
+        logo.set_margin_end(28)
+        logo.set_margin_bottom(24)
+        logo.set_opacity(0.85)
+        self.root.add_overlay(logo)
+
+        self.refresh_desktop()
+        self.connect("key-press-event", self._on_key)
+        self.connect("destroy", Gtk.main_quit)
+        GLib.timeout_add_seconds(1, self._tick_clock)
+
+    # ================================================================ base UI
+    def _build_dock(self):
+        box = ui.add_class(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4), "dock")
+        box.set_size_request(76, -1)
+        self.dock_buttons = {}
+
+        # The kite at the top opens the Settings menu (which also holds Add connection)
+        home = Gtk.Button()
+        ui.add_class(home, "dock-btn")
+        v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5, valign=Gtk.Align.CENTER)
+        v.pack_start(ui.picture("icon.png", 36), False, False, 0)
+        v.pack_start(Gtk.Label(label="Settings"), False, False, 0)
+        home.add(v)
+        home.connect("clicked", lambda *_: self.toggle_flyout("settings"))
+        self.dock_buttons["settings"] = home
+        box.pack_start(home, False, False, 0)
+        box.pack_start(Gtk.Box(), True, True, 0)
+
+        def item(name, label, cb):
+            b = Gtk.Button()
+            ui.add_class(b, "dock-btn")
+            v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5, valign=Gtk.Align.CENTER)
+            v.pack_start(ui.icon(name, 22, "#3F434B"), False, False, 0)
+            v.pack_start(Gtk.Label(label=label), False, False, 0)
+            b.add(v)
+            b.connect("clicked", lambda *_: cb())
+            self.dock_buttons[name] = b
+            box.pack_start(b, False, False, 0)
+
+        item("network", "Network", lambda: self.toggle_flyout("network"))
+        item("volume", "Volume", lambda: self.toggle_flyout("volume"))
+        item("display", "Display", lambda: self.toggle_flyout("display"))
+        box.pack_start(ui.add_class(Gtk.Box(), "dock-sep"), False, False, 0)
+        item("power", "Power", self.show_power_menu)
+        return box
+
+    def _set_active(self, name):
+        for n, b in self.dock_buttons.items():
+            ctx = b.get_style_context()
+            (ctx.add_class if n == name else ctx.remove_class)("active")
+
+    def _build_clock(self):
+        box = ui.add_class(Gtk.Box(spacing=10), "clock-pill")
+        box.set_halign(Gtk.Align.END)
+        box.set_valign(Gtk.Align.START)
+        box.set_margin_top(20)
+        box.set_margin_end(24)
+        self.clock_date = Gtk.Label()
+        self.clock_time = ui.label("", "strong")
+        box.pack_start(self.clock_date, False, False, 0)
+        box.pack_start(Gtk.Label(label="·"), False, False, 0)
+        box.pack_start(self.clock_time, False, False, 0)
+        self._tick_clock()
+        return box
+
+    def _tick_clock(self):
+        from .config import fmt_date, fmt_time
+        now = time.localtime()
+        self.clock_date.set_text(fmt_date(self.cfg.data, now))
+        self.clock_time.set_text(fmt_time(self.cfg.data, now))
+        if getattr(self, "lock_clock", None):
+            self.lock_clock.set_text(fmt_time(self.cfg.data, now))
+        return True
+
+    def refresh_desktop(self):
+        for child in self.desktop.get_children():
+            self.desktop.remove(child)
+        # Only real connections live on the desktop (Add connection is in the
+        # Settings menu). Until LiteLink is installed, an Install tile comes first.
+        if not system.is_installed():
+            self.desktop.add(self._install_icon())
+        for conn in self.cfg.connections:
+            self.desktop.add(self._desk_icon(conn))
+        self.desktop.show_all()
+
+    def _desk_icon(self, conn):
+        b = ui.add_class(Gtk.Button(), "desk-icon")
+        b.set_size_request(108, -1)
+        b.set_tooltip_text(conn["host"])
+        v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        ov = Gtk.Overlay(halign=Gtk.Align.CENTER)
+        tile = ui.add_class(Gtk.Box(), "icon-tile")
+        tile.set_size_request(60, 60)
+        img = ui.icon("monitor", 30, "#2659B3", 1.7)
+        img.set_hexpand(True)
+        tile.pack_start(img, True, True, 0)
+        ov.add(tile)
+        badge = ui.label(conn.get("protocol", "rdp").upper(), "proto-badge")
+        badge.set_halign(Gtk.Align.END)
+        badge.set_valign(Gtk.Align.END)
+        ov.add_overlay(badge)
+        if conn.get("auto"):
+            dot = ui.add_class(Gtk.Box(), "auto-dot")
+            dot.set_halign(Gtk.Align.START)
+            dot.set_valign(Gtk.Align.START)
+            dot.set_tooltip_text("Connects at startup")
+            ov.add_overlay(dot)
+        v.pack_start(ov, False, False, 0)
+        name = ui.label(conn["name"], "name", xalign=0.5, wrap=True)
+        name.set_max_width_chars(12)
+        v.pack_start(name, False, False, 0)
+        b.add(v)
+        b.connect("clicked", lambda *_: self.start_session(conn))
+        b.connect("button-press-event", self._icon_menu, conn)
+        child = Gtk.FlowBoxChild()
+        child.add(b)
+        return child
+
+    def _install_icon(self):
+        """Desktop tile shown only while running from a USB stick / DVD."""
+        from .storage import Installer
+        b = ui.add_class(Gtk.Button(), "desk-icon")
+        b.set_size_request(108, -1)
+        b.set_tooltip_text("Copy LiteLink to this device's internal storage")
+        v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        tile = ui.add_class(Gtk.Box(halign=Gtk.Align.CENTER), "icon-tile", "app")
+        tile.set_size_request(60, 60)
+        tile.pack_start(ui.picture("icon.png", 60), True, True, 0)   # the LiteLink app icon is the tile
+        v.pack_start(tile, False, False, 0)
+        name = ui.label("Install LiteLink", "name", xalign=0.5, wrap=True)
+        name.set_max_width_chars(12)
+        v.pack_start(name, False, False, 0)
+        b.add(v)
+        b.connect("clicked", lambda *_: Installer(self).open())
+        child = Gtk.FlowBoxChild()
+        child.add(b)
+        return child
+
+    def _icon_menu(self, widget, event, conn):
+        if event.button != 3:
+            return False
+        menu = Gtk.Menu()
+        for text, cb in (("Connect", lambda *_: self.start_session(conn)),
+                         ("Edit", lambda *_: self.edit_connection(conn)),
+                         ("Delete", lambda *_: self._delete(conn))):
+            mi = Gtk.MenuItem(label=text)
+            mi.connect("activate", cb)
+            menu.append(mi)
+        menu.show_all()
+        menu.popup_at_pointer(event)
+        return True
+
+    def _delete(self, conn):
+        self.cfg.delete(conn["id"])
+        self.refresh_desktop()
+
+    # ================================================================ layers
+    def push_layer(self, content, kind="dark", on_close=None, closable=True, center=True):
+        """Show content above everything. kind: dark | light | lock | wizard | clear.
+        lock and wizard are full screen over a fresh sky (wizard: soft tint for a light card)."""
+        catcher = Gtk.EventBox()
+        cls = {"dark": "scrim-dark", "light": "scrim-light", "lock": "lock-scrim"}.get(kind)
+        if kind in ("lock", "wizard"):
+            holder = Gtk.Overlay()
+            sky = Gtk.DrawingArea()
+            sky.connect("draw", draw_sky)
+            holder.add(sky)
+            tint = ui.add_class(Gtk.EventBox(), "lock-scrim" if kind == "lock" else "wizard-scrim")
+            tint.add(content)
+            holder.add_overlay(tint)
+            catcher.add(holder)
+        else:
+            if cls:
+                ui.add_class(catcher, cls)
+            if center:
+                content.set_halign(Gtk.Align.CENTER)
+                content.set_valign(Gtk.Align.CENTER)
+            catcher.add(content)
+        entry = {"widget": catcher, "kind": kind, "on_close": on_close, "closable": closable}
+        catcher.connect("button-press-event", self._layer_click, entry)
+        self.layers.append(entry)
+        self.root.add_overlay(catcher)
+        catcher.show_all()
+        return entry
+
+    def _layer_click(self, widget, event, entry):
+        # Right-click closes closable layers (e.g. the power menu).
+        if event.button == 3 and entry["closable"] and entry is self.layers[-1:][0]:
+            self.pop_layer(entry)
+            return True
+        return False
+
+    def pop_layer(self, entry=None):
+        if not self.layers:
+            return
+        entry = entry or self.layers[-1]
+        if entry in self.layers:
+            self.layers.remove(entry)
+            self.root.remove(entry["widget"])
+            entry["widget"].destroy()
+            if entry["on_close"]:
+                entry["on_close"]()
+
+    def clear_layers(self):
+        while self.layers:
+            self.pop_layer()
+
+    def _on_key(self, widget, event):
+        key = Gdk.keyval_name(event.keyval)
+        ctrl_alt = (event.state & Gdk.ModifierType.CONTROL_MASK) and (event.state & Gdk.ModifierType.MOD1_MASK)
+        if ctrl_alt and key in ("t", "T") and system.have("xterm") and system.maintenance_enabled():
+            subprocess.Popen(["xterm"])          # maintenance terminal
+            return True
+        if key == "Escape":
+            if self.layers and self.layers[-1]["closable"]:
+                self.pop_layer()
+                return True
+            if self.flyout:
+                self.close_flyout()
+                return True
+        return False
+
+    # ================================================================ flyouts
+    def toggle_flyout(self, name):
+        if self.flyout_name == name:
+            self.close_flyout()
+            return
+        self.close_flyout()
+        from . import flyouts
+        builder = getattr(flyouts, name)
+        card, slot = builder(self)
+        catcher = Gtk.EventBox()
+        catcher.set_margin_start(76)
+        catcher.connect("button-press-event", lambda *_: (self.close_flyout(), True)[1])
+        # slot >= 0: bottom margin of the dock button; < 0: anchored to the top
+        top = slot < 0
+        shield = Gtk.EventBox(halign=Gtk.Align.START, valign=Gtk.Align.START if top else Gtk.Align.END)
+        shield.connect("button-press-event", lambda *_: True)   # clicks inside stay inside
+        # Room around the card so its drop shadow isn't clipped to a hard edge.
+        pad = 40
+        card.set_margin_start(12)
+        card.set_margin_end(pad)
+        card.set_margin_top(pad)
+        card.set_margin_bottom(pad)
+        if top:
+            card.set_margin_top(-slot)
+        else:
+            shield.set_margin_bottom(max(0, slot - pad))
+        shield.add(card)
+        catcher.add(shield)
+        self.root.add_overlay(catcher)
+        catcher.show_all()
+        self.flyout, self.flyout_name = catcher, name
+        self._set_active(name)
+
+    def close_flyout(self):
+        if self.flyout:
+            self.root.remove(self.flyout)
+            self.flyout.destroy()
+        self.flyout = self.flyout_name = None
+        self._set_active(None)
+
+    # ================================================================ actions
+    def edit_connection(self, conn):
+        self.close_flyout()
+        from .dialogs import ConnectionDialog
+        dlg = ConnectionDialog(self, conn)
+        self.push_layer(dlg, "light")
+
+    def save_connection(self, conn):
+        self.cfg.upsert(conn)
+        self.refresh_desktop()
+
+    def open_settings(self, panel="network"):
+        self.close_flyout()
+        from .dialogs import SettingsWindow
+        self.push_layer(SettingsWindow(self, panel), "clear")
+
+    def show_power_menu(self):
+        self.close_flyout()
+        from .screens import power_menu
+        self._set_active("power")
+        self.push_layer(power_menu(self), "dark", on_close=lambda: self._set_active(None))
+
+    def lock(self):
+        self.clear_layers()
+        from .screens import lock_screen
+        self.lock_clock = None
+        self.push_layer(lock_screen(self), "lock", closable=False, center=False)
+
+    def unlock(self, entry):
+        self.lock_clock = None
+        self.pop_layer(entry)
+
+    def start_session(self, conn, password=None, username=None, domain=None, ignore_cert=False):
+        self.close_flyout()
+        self.clear_layers()
+        from . import screens
+        from .rdp import Session
+        if not conn["host"]:
+            self.edit_connection(conn)
+            return
+        pw = password if password is not None else conn.get("password", "")
+        layer = self.push_layer(screens.connecting(self, conn), "dark", closable=False)
+        try:
+            self.session = Session(conn, pw, lambda *a: self._session_ended(conn, layer, *a),
+                                   username=username, domain=domain, ignore_cert=ignore_cert)
+        except OSError as e:
+            self.pop_layer(layer)
+            self.push_layer(screens.error(self, conn, "unreachable", 255, str(e)), "dark")
+
+    def cancel_session(self):
+        if self.session:
+            self.session.cancel()
+
+    def _session_ended(self, conn, layer, kind, code, text, seconds):
+        from . import screens
+        self.session = None
+        self.pop_layer(layer)
+        if kind == "closed":
+            return False
+        # A drop after a working session is "ended"; a fast failure is a connect error.
+        if kind == "unreachable" and seconds > 20:
+            kind = "ended"
+        self.push_layer(screens.error(self, conn, kind, code, text), "dark", closable=kind != "ended")
+        return False
+
+    def autostart(self):
+        self._restore_display()
+        # Boot menu "Install LiteLink OS" -> open the installer straight away
+        if system.boot_option("litelink.install"):
+            from .storage import Installer
+            GLib.timeout_add(800, lambda: (Installer(self).open(), False)[1])
+            return
+        auto = next((c for c in self.cfg.connections if c.get("auto")), None)
+        if auto:
+            GLib.timeout_add(600, lambda: (self.start_session(auto), False)[1])
+        else:
+            GLib.timeout_add(2500, lambda: (self._offer_usb_storage(), False)[1])
+
+    def _restore_display(self):
+        """Re-apply a resolution the user kept (saved with persistent settings)."""
+        saved = self.cfg.data.get("display_mode") or {}
+        out, mode = saved.get("output"), saved.get("mode")
+        if not out or not mode:
+            return
+        d = next((x for x in system.displays() if x["output"] == out), None)
+        if d and mode in d["modes"] and mode != d["current"]:
+            system.set_mode(out, mode)
+
+    def _offer_usb_storage(self):
+        """On a USB stick without settings storage, offer to set it up (once per boot)."""
+        def show(st):
+            if not st.get("can_setup_usb") or not st.get("medium_removable"):
+                return
+            card = ui.add_class(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10), "storage-card")
+            card.set_halign(Gtk.Align.END)
+            card.set_valign(Gtk.Align.START)
+            card.set_margin_top(72)
+            card.set_margin_end(24)
+            card.set_size_request(320, -1)
+            card.pack_start(ui.label("Settings aren't saved on this USB stick", "strong body"), False, False, 0)
+            t = ui.label("Connections and Wi-Fi are lost when you restart. Set up storage to keep them.",
+                         "muted small")
+            t.set_line_wrap(True)
+            t.set_max_width_chars(40)
+            card.pack_start(t, False, False, 0)
+            row = Gtk.Box(spacing=8, halign=Gtk.Align.END)
+
+            def close():
+                self.root.remove(card)
+                card.destroy()
+
+            def setup():
+                close()
+                from .storage import usb_setup
+                usb_setup(self)
+            row.pack_start(ui.button("Not now", "btn", close), False, False, 0)
+            row.pack_start(ui.button("Set up", "btn btn-primary", setup), False, False, 0)
+            card.pack_start(row, False, False, 0)
+            self.root.add_overlay(card)
+            card.show_all()
+        system.in_background(system.storage_status, show)
+
+
+def main():
+    css = Gtk.CssProvider()
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    css.load_from_path(os.path.join(here, "theme.css"))
+    Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), css,
+                                             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    win = Shell()
+    screen = Gdk.Screen.get_default()
+    win.set_default_size(screen.get_width(), screen.get_height())
+    win.show_all()
+    win.fullscreen()
+    win.autostart()
+    Gtk.main()

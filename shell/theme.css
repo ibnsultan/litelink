@@ -1,0 +1,293 @@
+/* LiteLink shell theme (GTK 3).
+   Palette: blue #2F6FD6 · ink #16171A · muted #5A606B · line #ECEEF2.
+   Severity: blue (low) · amber #F5A524 · orange #E8710A · red #E5484D (high). */
+
+* { font-family: "Inter", sans-serif; }
+/* No dashed GTK focus rectangles on the shell's own buttons */
+.dock-btn, .desk-icon, .power-btn, .row-btn, .nav-btn, .tab, .icon-btn, .link-btn, .toggle-details, .btn,
+.round-glass, .round-blue { outline-style: none; -gtk-outline-radius: 0; }
+window.litelink { background-color: #1E4E9C; }
+label { color: #16171A; }
+
+/* ---------------------------------------------------------------- dock */
+.dock {
+  background-color: rgba(255, 255, 255, 0.92);
+  border-right: 1px solid rgba(22, 23, 26, 0.08);
+  padding: 14px 6px;
+}
+.dock-btn {
+  min-width: 64px; min-height: 64px; padding: 0;
+  border-radius: 12px; border: none; background: transparent; box-shadow: none;
+}
+.dock-btn:hover { background-color: #EEF3FB; }
+.dock-btn.active { background-color: #E7EFFB; }
+.dock-btn label { font-size: 10.5px; font-weight: 500; color: #3F434B; }
+.dock-btn.active label { color: #2659B3; }
+.dock-sep { background-color: rgba(22, 23, 26, 0.1); min-height: 1px; margin: 6px 12px; }
+
+/* ---------------------------------------------------------------- desktop */
+.clock-pill { background-color: rgba(255, 255, 255, 0.18); border-radius: 999px; padding: 8px 14px; }
+.clock-pill label { color: #FFFFFF; font-size: 14px; font-weight: 500; }
+.clock-pill .strong { font-weight: 600; }
+.desk-icon {
+  border-radius: 10px; border: none; background: transparent; box-shadow: none;
+  padding: 10px 6px 8px;
+}
+.desk-icon:hover, .desk-icon:focus { background-color: rgba(255, 255, 255, 0.18); }
+.desk-icon label.name { color: #FFFFFF; font-size: 13px; font-weight: 500; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5); }
+.icon-tile {
+  min-width: 60px; min-height: 60px; border-radius: 14px;
+  background-image: linear-gradient(to bottom, #FFFFFF, #EEF3FB);
+  box-shadow: 0 4px 12px rgba(10, 30, 70, 0.28);
+}
+.icon-tile.app { background-image: none; background-color: transparent; }
+/* Settings menu: divider + "Add connection" (last item) */
+.menu-sep { background-color: #ECEEF2; min-height: 1px; margin-left: 16px; margin-right: 16px; }
+label.add-link, .row-btn label.add-link { color: #2659B3; font-weight: 500; }
+.proto-badge {
+  background-color: #2F6FD6; border-radius: 5px; padding: 1px 5px;
+  color: #FFFFFF; font-size: 9px; font-weight: 600;
+}
+.auto-dot { background-color: #1F9D61; border: 2px solid #FFFFFF; border-radius: 8px; min-width: 12px; min-height: 12px; }
+
+/* ---------------------------------------------------------------- cards & flyouts */
+.card { background-color: #FFFFFF; border-radius: 14px; box-shadow: 0 8px 22px rgba(16, 32, 64, 0.22); }
+/* Right-click menus (e.g. on desktop icons) */
+menu, .menu { background-color: #FFFFFF; border: 1px solid #D5D9E0; border-radius: 10px; padding: 6px; }
+menuitem { padding: 8px 14px; border-radius: 6px; min-width: 140px; }
+menuitem:hover { background-color: #F2F5FA; }
+menuitem label { color: #16171A; font-size: 14px; }
+menuitem:hover label { color: #2659B3; }
+tooltip { background-color: #16171A; border-radius: 6px; padding: 4px 8px; }
+tooltip label { color: #FFFFFF; font-size: 12px; }
+.flyout { padding: 16px; }
+.flyout-title { font-size: 13px; font-weight: 600; color: #5A606B; }
+.flyout-header { background-color: #2F6FD6; border-radius: 14px 14px 0 0; padding: 14px 16px; }
+.flyout-header label { color: #FFFFFF; font-size: 14px; font-weight: 600; }
+.group-title { font-size: 11px; font-weight: 600; color: #2659B3; }
+.row-btn {
+  border: none; background: transparent; box-shadow: none; border-radius: 8px;
+  padding: 8px 12px;
+}
+.row-btn:hover { background-color: #F2F5FA; }
+.row-btn label { font-size: 14px; color: #16171A; font-weight: 400; }
+.link-btn { border: none; background: transparent; box-shadow: none; padding: 0; }
+.link-btn label { color: #2F6FD6; font-size: 13px; font-weight: 500; }
+.ok { color: #1F7A4D; }
+.muted { color: #5A606B; }
+.faint { color: #8A8F98; }
+.h1 { font-size: 22px; font-weight: 600; }
+.h2 { font-size: 17px; font-weight: 600; }
+.h3 { font-size: 20px; font-weight: 600; }
+.strong { font-weight: 600; }
+.small { font-size: 12px; }
+.body { font-size: 14px; }
+.field-label { font-size: 13px; font-weight: 500; color: #3F434B; }
+.optional { font-size: 12px; font-weight: 400; color: #8A8F98; }
+
+entry {
+  min-height: 38px; padding: 0 12px; border-radius: 8px;
+  border: 1px solid #D5D9E0; background-color: #FFFFFF; color: #16171A;
+  box-shadow: none; font-size: 14px;
+}
+entry:focus { border-color: #2F6FD6; box-shadow: 0 0 0 3px rgba(47, 111, 214, 0.18); }
+combobox button { min-height: 38px; border-radius: 8px; border: 1px solid #D5D9E0; background: #FFFFFF; box-shadow: none; }
+/* LiteLink dropdown (select field) */
+.dropdown {
+  min-height: 38px; padding: 0 12px; border-radius: 8px; border: 1px solid #D5D9E0;
+  background: #FFFFFF; box-shadow: none; outline-style: none;
+}
+.dropdown label { font-size: 14px; color: #16171A; font-weight: 400; }
+.dropdown:hover { border-color: #B9C0CA; background: #FFFFFF; }
+.dropdown:checked { border-color: #2F6FD6; box-shadow: 0 0 0 3px rgba(47, 111, 214, 0.18); background: #FFFFFF; }
+popover.dropdown-pop {
+  /* No drop shadow: without a compositor GTK draws it as a hard-edged box */
+  background-color: #FFFFFF; border: 1px solid #D5D9E0; border-radius: 10px;
+  box-shadow: none; padding: 6px;
+}
+popover.dropdown-pop list { background: transparent; }
+popover.dropdown-pop row { border-radius: 6px; padding: 8px 10px; outline-style: none; }
+popover.dropdown-pop row:hover, popover.dropdown-pop row:focus { background-color: #F2F5FA; }
+popover.dropdown-pop row label { font-size: 14px; color: #16171A; }
+popover.dropdown-pop row.selected-row label { color: #2659B3; font-weight: 600; }
+checkbutton label { font-size: 14px; color: #16171A; }
+check { border-radius: 4px; }
+check:checked { background-color: #2F6FD6; border-color: #2F6FD6; color: #FFFFFF; }
+/* Locked on (e.g. RDP in the installer): grey tick */
+checkbutton check:checked:disabled, check:checked:disabled {
+    background-color: #C9CED6; background-image: none; border-color: #C9CED6; color: #FFFFFF;
+    -gtk-icon-source: -gtk-icontheme("object-select-symbolic"); }
+scale trough { min-height: 4px; border-radius: 2px; background-color: #E1E4E9; }
+scale highlight { background-color: #2F6FD6; border-radius: 2px; }
+scale slider { min-width: 16px; min-height: 16px; border-radius: 8px; background: #FFFFFF; border: 1px solid #C9CED6; }
+switch { border-radius: 999px; }
+switch:checked { background-color: #2F6FD6; }
+
+/* ---------------------------------------------------------------- buttons */
+.btn {
+  min-height: 38px; padding: 0 18px; border-radius: 8px; box-shadow: none;
+  border: 1px solid #C9CED6; background: #FFFFFF;
+}
+.btn label { font-size: 14px; font-weight: 500; color: #16171A; }
+.btn:hover { background: #F4F6F9; }
+.btn-primary { background: #2F6FD6; border-color: #2F6FD6; }
+.btn-primary label { color: #FFFFFF; font-weight: 600; }
+.btn-primary:hover { background: #2659B3; }
+.pill { border-radius: 999px; min-height: 40px; padding: 0 22px; }
+.btn-ghost { background: transparent; border: 1px solid rgba(255, 255, 255, 0.45); }
+.btn-ghost label { color: #FFFFFF; }
+.btn-ghost:hover { background: rgba(255, 255, 255, 0.14); }
+.btn-red { background: #E5484D; border-color: #E5484D; }
+.btn-orange { background: #E8710A; border-color: #E8710A; }
+.btn-amber { background: #F5A524; border-color: #F5A524; }
+.btn-red label, .btn-orange label { color: #FFFFFF; font-weight: 600; }
+.btn-amber label { color: #2B1A00; font-weight: 600; }
+/* Coloured buttons keep their colour on hover (a shade darker); the generic
+   .btn:hover above would otherwise turn them near-white and hide white text. */
+.btn.btn-primary:hover { background: #2659B3; }
+.btn.btn-red:hover { background: #C93C41; }
+.btn.btn-orange:hover { background: #CC6308; }
+.btn.btn-amber:hover { background: #E0951C; }
+.btn.btn-ghost:hover { background: rgba(255, 255, 255, 0.14); }
+.btn.proto-on:hover { background: #DCE8FA; }
+/* Countdown carried inside a button: [icon] Label | 30 */
+.count-sep { background-color: rgba(255, 255, 255, 0.45); min-width: 1px; min-height: 18px; }
+.btn-amber .count-sep { background-color: rgba(43, 26, 0, 0.35); }
+.btn:not(.btn-primary):not(.btn-red):not(.btn-orange):not(.btn-amber):not(.btn-ghost) .count-sep { background-color: #C9CED6; }
+.btn:not(.btn-primary):not(.btn-red):not(.btn-orange):not(.btn-amber):not(.btn-ghost) .count { color: #5A606B; }
+.count { font-weight: 600; font-feature-settings: "tnum"; }
+.proto-on { background: #E7EFFB; border-color: #2F6FD6; }
+.proto-on label { color: #2659B3; font-weight: 600; }
+.proto-off { background: #F4F5F7; border-color: #E6E8EC; }
+.proto-off label { color: #A3A8B0; }
+.icon-btn { min-width: 32px; min-height: 32px; padding: 0; border: none; background: transparent; box-shadow: none; border-radius: 8px; }
+.icon-btn:hover { background: #F2F5FA; }
+
+/* ---------------------------------------------------------------- dialogs */
+.scrim-light { background-color: rgba(14, 22, 40, 0.32); }
+.dialog { background-color: #FFFFFF; border-radius: 16px; box-shadow: 0 24px 64px rgba(10, 20, 40, 0.35); }
+.dialog-footer { background-color: #FAFBFC; border-top: 1px solid #ECEEF2; border-radius: 0 0 16px 16px; padding: 14px 20px; }
+.tabs { border-bottom: 1px solid #ECEEF2; }
+.tab { border: none; background: transparent; box-shadow: none; border-radius: 0; padding: 0; min-height: 42px; border-bottom: 2px solid transparent; }
+.tab label { font-size: 14px; font-weight: 500; color: #5A606B; }
+.tab.active { border-bottom-color: #2F6FD6; }
+.tab.active label { color: #2659B3; font-weight: 600; }
+.device-row { border: 1px solid #ECEEF2; border-radius: 10px; padding: 12px 14px; }
+.settings-nav { background-color: #F6F7F9; border-right: 1px solid #ECEEF2; padding: 10px; border-radius: 0 0 0 16px; }
+.nav-btn { border: none; background: transparent; box-shadow: none; border-radius: 8px; padding: 0 10px; min-height: 38px; }
+.nav-btn:hover { background: #E9EDF3; }
+.nav-btn label { font-size: 14px; font-weight: 500; color: #2B2E34; }
+.nav-btn.active { background: #E7EFFB; }
+.nav-btn.active label { color: #2659B3; font-weight: 600; }
+.panel-box { border: 1px solid #ECEEF2; border-radius: 12px; padding: 16px; }
+/* Expandable adapter cards (Settings › Network) */
+.acc { border: 1px solid #E6E8EC; border-radius: 12px; background-color: #FFFFFF; }
+.acc.disabled { opacity: 0.5; }
+.acc-head { border: none; background: transparent; box-shadow: none; border-radius: 12px; padding: 14px 16px; outline-style: none; }
+.acc-head:hover { background: #F7F8FA; }
+.acc-head:disabled { background: transparent; }
+.acc-body { background-color: #FAFBFC; border-radius: 0 0 12px 12px; }
+.acc-row { border-top: 1px solid #ECEEF2; padding: 12px 16px 12px 70px; }
+.plain-row { border-top: 1px solid #ECEEF2; padding: 10px 16px; }
+/* Settings list group (title + subtitle left, control right) */
+.list-group { margin-bottom: 4px; }
+.list-row { padding: 14px 16px; min-height: 28px; }
+.list-row-sep { border-top: 1px solid #ECEEF2; }
+.list-row-btn { border-radius: 0; border-left: none; border-right: none; border-bottom: none; background: transparent; box-shadow: none; outline-style: none; }
+.list-row-btn:not(.list-row-sep) { border-top: none; }
+.list-row-btn:hover { background: #F7F8FA; }
+.list-row-btn:disabled { background: transparent; }
+.list-row:disabled label { color: #A3A8B0; }
+/* Installer & storage */
+.details-light { background-color: #F6F7F9; border-radius: 8px; padding: 10px 12px; font-family: monospace; font-size: 12px; color: #5A606B; }
+.install-anim { padding: 12px 0; }
+progressbar trough { min-height: 6px; border-radius: 3px; background-color: #E1E4E9; border: none; }
+progressbar progress { min-height: 6px; border-radius: 3px; background-color: #2F6FD6; border: none; }
+.storage-card { background-color: #FFFFFF; border-radius: 14px; padding: 14px 16px; box-shadow: 0 8px 22px rgba(16, 32, 64, 0.22); }
+radiobutton label { font-size: 14px; color: #16171A; }
+radio:checked { background-color: #2F6FD6; border-color: #2F6FD6; color: #FFFFFF; }
+.tz-list { background: transparent; }
+.tz-list row { padding: 8px 10px; border-radius: 6px; }
+.tz-list row:hover { background: #F2F5FA; }
+/* Unavailable items look disabled */
+.nav-btn:disabled label, .row-btn:disabled label { color: rgba(43, 46, 52, 0.4); }
+.nav-btn:disabled image, .row-btn:disabled image { opacity: 0.4; }
+.btn:disabled { background: #F4F5F7; border-color: #E6E8EC; }
+.btn:disabled label { color: #A3A8B0; }
+/* Destructive buttons stay red while waiting, just faded */
+.btn.btn-red:disabled { background: #F4A9AC; border-color: #F4A9AC; }
+.btn.btn-red:disabled label { color: #FFFFFF; }
+.btn.btn-red:disabled .count-sep { background-color: rgba(255, 255, 255, 0.6); }
+.soft { background-color: #F6F7F9; border-radius: 12px; padding: 20px; }
+/* Display preview: one tile per screen at its real proportions */
+.mon-tile { border: 2px solid #C9CED6; border-radius: 8px; background-color: #FFFFFF; }
+.mon-tile.active { border-color: #2F6FD6; background-color: #E7EFFB; }
+.mon-num { font-size: 22px; font-weight: 600; color: #6B7280; }
+.mon-name { font-size: 12px; color: #6B7280; }
+.mon-tile.active .mon-num, .mon-tile.active .mon-name { color: #2659B3; }
+.placeholder { border: 1px dashed #D5D9E0; border-radius: 12px; }
+.ico-chip { background-color: #E7EFFB; border-radius: 10px; min-width: 40px; min-height: 40px; }
+
+/* ---------------------------------------------------------------- system screens (dark) */
+.scrim-dark { background-color: rgba(12, 16, 24, 0.84); }
+.scrim-dark label { color: #FFFFFF; }
+.scrim-dark .sub { color: #C3CCDA; font-size: 14px; }
+.scrim-dark .hint { color: #8B93A1; font-size: 12px; }
+.scrim-dark .countdown { color: #7CC0F2; font-size: 13px; font-weight: 500; }
+.scrim-dark .details { background-color: rgba(255, 255, 255, 0.06); border-radius: 8px; padding: 10px 14px; font-family: monospace; font-size: 12px; color: #C3CCDA; }
+.scrim-dark entry { background-color: rgba(255, 255, 255, 0.08); border-color: rgba(255, 255, 255, 0.22); color: #FFFFFF; }
+.scrim-dark .cert { background-color: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 10px; padding: 14px 16px; }
+.scrim-dark .cert .k { color: #9AA6B8; font-size: 13px; }
+.scrim-dark checkbutton label { color: #DCE3EE; font-size: 13px; }
+.toggle-details { border: none; background: transparent; box-shadow: none; }
+.toggle-details label { color: #9AA6B8; font-size: 12px; }
+.badge { border-radius: 20px; min-width: 40px; min-height: 40px; border: 3px solid #161B25; }
+.badge-blue { background-color: #2F6FD6; }
+.badge-amber { background-color: #F5A524; }
+.badge-orange { background-color: #E8710A; }
+.badge-red { background-color: #E5484D; }
+.power-btn { border: none; background: transparent; box-shadow: none; padding: 4px; }
+.power-circle { border-radius: 36px; min-width: 72px; min-height: 72px; }
+.power-btn:hover .power-circle { box-shadow: 0 0 0 6px rgba(255, 255, 255, 0.1); }
+.power-btn label { font-size: 14px; font-weight: 600; color: #FFFFFF; }
+
+/* ---------------------------------------------------------------- lock */
+.lock-scrim { background-color: rgba(14, 26, 52, 0.45); }
+.lock-scrim label { color: #FFFFFF; }
+.lock-clock { font-size: 104px; font-weight: 300; }
+.lock-date { font-size: 18px; font-weight: 500; }
+.lock-scrim entry { border-radius: 999px; min-height: 44px; background-color: rgba(255, 255, 255, 0.16); border-color: rgba(255, 255, 255, 0.35); color: #FFFFFF; }
+.round-glass { background: rgba(255, 255, 255, 0.16); border-radius: 22px; min-width: 40px; min-height: 40px; border: none; box-shadow: none; padding: 0; }
+.round-glass:hover { background: rgba(255, 255, 255, 0.26); }
+.round-blue { background: #2F6FD6; border-radius: 18px; min-width: 36px; min-height: 36px; border: none; box-shadow: none; padding: 0; }
+/* Install wizard (full screen, separate from Settings) */
+.wizard-scrim { background-color: rgba(14, 26, 52, 0.28); }
+.wizard-card { background-color: #FFFFFF; border-radius: 18px; box-shadow: 0 30px 80px rgba(10, 20, 40, 0.35); }
+.wizard-rail { background-color: #F6F7F9; border-radius: 18px 0 0 18px; border-right: 1px solid #ECEEF2; padding: 32px 24px; }
+.wizard-step { padding: 8px 10px; border-radius: 10px; }
+.wizard-step label { color: #8B919C; }
+.wizard-num { background-color: #E6E8EC; border-radius: 999px; }
+.wizard-num label { font-size: 12px; font-weight: 600; color: #6B7280; }
+.wizard-step.active { background-color: #E8F0FC; }
+.wizard-step.active > label { color: #16171A; font-weight: 600; }
+.wizard-step.active .wizard-num { background-color: #2F6FD6; }
+.wizard-step.active .wizard-num label { color: #FFFFFF; }
+.wizard-step.done > label { color: #3A3F47; }
+.wizard-step.done .wizard-num { background-color: #2F9E6B; }
+.wizard-page { padding: 40px 44px 12px 44px; }
+.wizard-footer { padding: 16px 44px 28px 44px; }
+/* Subtle overlay scrollbar: thin, rounded, faint; only shows while scrolling */
+scrollbar, scrollbar trough { background: transparent; border: none; box-shadow: none; }
+scrollbar slider { min-width: 4px; min-height: 40px; border: none; border-radius: 999px;
+                   background-color: rgba(22, 23, 26, 0.16); margin: 2px; }
+scrollbar slider:hover, scrollbar slider:active { background-color: rgba(22, 23, 26, 0.28); min-width: 6px; }
+.wizard-row { padding: 10px 4px; min-height: 40px; }
+.wizard-row-sep { border-bottom: 1px solid #ECEEF2; }
+.wizard-row:disabled label { color: #A3A8B0; }
+.wizard-sec { font-size: 12px; font-weight: 600; color: #2659B3; margin-top: 6px; }
+checkbutton:disabled label { color: #A3A8B0; }
+.wizard-disk { padding: 12px 4px; }
+.wizard-disk-sep { border-bottom: 1px solid #ECEEF2; }
+.wizard-disk radiobutton { padding: 4px 0; }
+.btn.btn-sm { min-height: 30px; padding: 0 12px; }
+.btn.btn-sm label { font-size: 13px; }
