@@ -183,9 +183,10 @@ switch:checked { background-color: #2F6FD6; }
 /* Expandable adapter cards (Settings › Network) */
 .acc { border: 1px solid #E6E8EC; border-radius: 12px; background-color: #FFFFFF; }
 .acc.disabled { opacity: 0.5; }
-.acc-head { border: none; background: transparent; box-shadow: none; border-radius: 12px; padding: 14px 16px; outline-style: none; }
-.acc-head:hover { background: #F7F8FA; }
-.acc-head:disabled { background: transparent; }
+/* Card header: an event box around icon, title, the card's switch and the chevron */
+.acc-head { background-color: transparent; border-radius: 12px; }
+.acc-head:hover { background-color: #F7F8FA; }
+.acc-head.disabled, .acc-head.disabled:hover { background-color: transparent; }
 .acc-body { background-color: #FAFBFC; border-radius: 0 0 12px 12px; }
 .acc-row { border-top: 1px solid #ECEEF2; padding: 12px 16px 12px 70px; }
 .plain-row { border-top: 1px solid #ECEEF2; padding: 10px 16px; }

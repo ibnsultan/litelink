@@ -1,7 +1,7 @@
 """The connection dialog and the Settings window."""
 import copy
 
-from gi.repository import GLib, Gtk
+from gi.repository import Gdk, GLib, Gtk
 
 from . import system, ui
 from .config import DEFAULT_CONNECTION, normalize
@@ -416,8 +416,13 @@ class SettingsWindow(Gtk.Box):
         """An adapter card: header row (icon, title, status, extra, chevron) and a
         revealer body. Returns (card, body box)."""
         card = ui.add_class(Gtk.Box(orientation=Gtk.Orientation.VERTICAL), "acc")
-        head = ui.add_class(Gtk.Button(), "acc-head")
-        row = Gtk.Box(spacing=14)
+        # The header is a click area *around* its contents, not a Gtk.Button:
+        # a button swallows clicks meant for controls inside it (the `extra`
+        # switch would only toggle the card). Here the switch gets its own
+        # clicks and everything else opens / closes the card.
+        head = ui.add_class(Gtk.EventBox(), "acc-head")
+        head.set_can_focus(expandable)
+        row = Gtk.Box(spacing=14, margin_top=14, margin_bottom=14, margin_start=16, margin_end=16)
         chip = ui.add_class(Gtk.Box(), "ico-chip")
         chip.pack_start(ui.icon(icon_name, 20, "#2659B3" if expandable else "#8A8F98"), True, True, 0)
         row.pack_start(chip, False, False, 0)
@@ -440,10 +445,35 @@ class SettingsWindow(Gtk.Box):
             rev.set_reveal_child(not rev.get_reveal_child())
             chev.set_from_pixbuf(ui.icon_pixbuf("chev_up" if rev.get_reveal_child() else "chev_down",
                                                 18, "#5A606B", 2))
-        head.connect("clicked", flip)
+
+        def released(_w, ev):
+            if ev.button == 1 and expandable:
+                flip()
+            return False
+
+        def key(_w, ev):
+            if expandable and Gdk.keyval_name(ev.keyval) in ("Return", "KP_Enter", "space"):
+                flip()
+                return True
+            return False
+
+        def hover(_w, ev, on):
+            if ev.detail == Gdk.NotifyType.INFERIOR:      # moving onto the switch isn't leaving
+                return False
+            if on:
+                head.set_state_flags(Gtk.StateFlags.PRELIGHT, False)
+            else:
+                head.unset_state_flags(Gtk.StateFlags.PRELIGHT)
+            return False
+        head.connect("button-release-event", released)
+        head.connect("key-press-event", key)
+        head.connect("enter-notify-event", hover, True)
+        head.connect("leave-notify-event", hover, False)
         if not expandable:
-            head.set_sensitive(False)
+            ui.add_class(head, "disabled")
             ui.add_class(card, "disabled")
+            for w in (chip, col, chev):
+                w.set_sensitive(False)
         return card, body
 
     def _acc_row(self, body, label_text, value, action=None, on_action=None, enabled=True):
