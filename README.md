@@ -92,28 +92,6 @@ The chosen disk is **erased** and split into three partitions:
 Because the system image is read-only, each restart returns the device to the same state,
 with only your settings carried over.
 
-## Using LiteLink
-
-| Dock (left)          |                                                          |
-| -------------------- | -------------------------------------------------------- |
-| **Kite** (top) | Settings menu. **Add connection** is the last item |
-| Network              | Connection status and IP address, Wi-Fi on/off           |
-| Volume               | Output volume                                            |
-| Display              | Resolution                                               |
-| Power                | Lock, restart or shut down. Esc cancels                  |
-
-### VPN
-
-Open **Settings › VPN** and click **Add tunnel**. Plug in a USB drive (FAT32, exFAT or NTFS)
-holding the WireGuard `.conf` file from your IT team. LiteLink lists the `.conf` files it
-finds, shows what the chosen one contains, and imports it. The drive is mounted read-only
-and released when the dialog closes. **Enter the details manually** opens a form instead,
-pre-filled from the chosen file if there is one. Each tunnel has an on/off switch and can
-connect automatically at startup.
-
-A connection that needs a private network can name its tunnel (the **VPN** field in the
-connection's settings). Opening that connection brings the tunnel up first.
-
 ### Maintenance tools
 
 When running from a USB stick, **Ctrl+Alt+T** opens a terminal, and `lspci`, `lsusb` and
