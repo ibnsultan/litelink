@@ -365,6 +365,131 @@ def storage_run(args, on_progress, on_done, on_log=None):
     threading.Thread(target=worker, daemon=True).start()
 
 
+# ---------------------------------------------------------------- USB drives (read-only)
+MEDIA = "/usr/local/sbin/litelink-media"
+
+
+def media_list():
+    """USB drive partitions LiteLink can read: [{path, label, fstype, size, drive, mountpoint}]"""
+    import json
+    rc, out = run([MEDIA, "list"], timeout=10, sudo=True)
+    try:
+        return json.loads(out) if rc == 0 else []
+    except ValueError:
+        return []
+
+
+def media_mount(dev):
+    """Mount read-only; -> mount point or None."""
+    rc, out = run([MEDIA, "mount", dev], timeout=20, sudo=True)
+    return out if rc == 0 and out else None
+
+
+def media_unmount(dev=None):
+    run([MEDIA, "unmount"] + ([dev] if dev else []), timeout=20, sudo=True)
+
+
+def find_files(root, suffix, depth=2, limit=40):
+    """Files ending in suffix on a mounted drive -> [(path, folder label)]"""
+    found = []
+    root = root.rstrip("/")
+    for cur, dirs, files in os.walk(root):
+        level = cur[len(root):].count("/")
+        dirs[:] = [d for d in sorted(dirs) if not d.startswith((".", "$", "System Volume"))] if level < depth else []
+        for f in sorted(files):
+            if f.lower().endswith(suffix) and not f.startswith("."):
+                rel = cur[len(root):].strip("/")
+                found.append((os.path.join(cur, f), f"{rel} folder" if rel else "Top folder"))
+                if len(found) >= limit:
+                    return found
+    return found
+
+
+# ---------------------------------------------------------------- VPN (WireGuard)
+VPN = "/usr/local/sbin/litelink-vpn"
+
+
+def _vpn(args, payload=None, timeout=40):
+    """-> (ok, stdout, error message)"""
+    import json
+    try:
+        r = subprocess.run(["sudo", "-n", VPN, *args], capture_output=True, text=True, timeout=timeout,
+                           input=json.dumps(payload) if payload is not None else None)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, "", str(e)
+    err = (r.stderr or "").strip()
+    return r.returncode == 0, r.stdout.strip(), err[6:] if err.startswith("ERROR ") else err
+
+
+def vpn_list():
+    import json
+    ok, out, _ = _vpn(["list"], timeout=15)
+    try:
+        return json.loads(out) if ok else []
+    except ValueError:
+        return []
+
+
+def vpn_save(data):
+    """Add or replace (data["uuid"]) a tunnel -> (ok, error message)"""
+    ok, _out, err = _vpn(["save"], data)
+    return ok, err
+
+
+def vpn_remove(uuid):
+    return _vpn(["remove", uuid])[0]
+
+
+def vpn_set(uuid, up):
+    ok, _out, err = _vpn(["up" if up else "down", uuid])
+    return ok, err
+
+
+def vpn_autoconnect(uuid, on):
+    return _vpn(["autoconnect", uuid, "on" if on else "off"])[0]
+
+
+def parse_wireguard(text):
+    """A WireGuard .conf -> dict with the form's keys (first [Peer] only)."""
+    d = {"private_key": "", "address": [], "dns": [], "public_key": "", "preshared_key": "",
+         "endpoint": "", "allowed_ips": [], "keepalive": "", "peers": 0}
+    section = None
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().lower()
+            if section == "peer":
+                d["peers"] += 1
+            continue
+        if "=" not in line or (section == "peer" and d["peers"] > 1):
+            continue
+        k, v = (x.strip() for x in line.split("=", 1))
+        k = k.lower()
+        if section == "interface":
+            if k == "privatekey":
+                d["private_key"] = v
+            elif k == "address":
+                d["address"] += [a.strip() for a in v.split(",") if a.strip()]
+            elif k == "dns":
+                d["dns"] += [a.strip() for a in v.split(",") if a.strip()]
+        elif section == "peer":
+            if k == "publickey":
+                d["public_key"] = v
+            elif k == "presharedkey":
+                d["preshared_key"] = v
+            elif k == "endpoint":
+                d["endpoint"] = v
+            elif k == "allowedips":
+                d["allowed_ips"] += [a.strip() for a in v.split(",") if a.strip()]
+            elif k == "persistentkeepalive":
+                d["keepalive"] = v
+    for k in ("address", "dns", "allowed_ips"):
+        d[k] = ", ".join(d[k])
+    return d
+
+
 def human_size(n):
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1000 or unit == "TB":

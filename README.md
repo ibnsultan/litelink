@@ -22,6 +22,8 @@ Debian 13 and replaces the original Ubuntu 18.04 image. alot of things are unfin
   resolution (reverting automatically if a mode doesn't work), time zone and time servers.
 - **Runs from a USB stick.** Settings can be saved on the same stick, so connections and
   Wi-Fi networks are kept across restarts.
+- **VPN (WireGuard).** Reach desktops on a private network. Import the `.conf` file from a
+  USB drive, or enter the details by hand, in **Settings › VPN**.
 
 ## Hardware
 
@@ -100,6 +102,18 @@ with only your settings carried over.
 | Display              | Resolution                                               |
 | Power                | Lock, restart or shut down. Esc cancels                  |
 
+### VPN
+
+Open **Settings › VPN** and click **Add tunnel**. Plug in a USB drive (FAT32, exFAT or NTFS)
+holding the WireGuard `.conf` file from your IT team. LiteLink lists the `.conf` files it
+finds, shows what the chosen one contains, and imports it. The drive is mounted read-only
+and released when the dialog closes. **Enter the details manually** opens a form instead,
+pre-filled from the chosen file if there is one. Each tunnel has an on/off switch and can
+connect automatically at startup.
+
+A connection that needs a private network can name its tunnel (the **VPN** field in the
+connection's settings). Opening that connection brings the tunnel up first.
+
 ### Maintenance tools
 
 When running from a USB stick, **Ctrl+Alt+T** opens a terminal, and `lspci`, `lsusb` and
@@ -147,7 +161,8 @@ build/
     package-lists/ Packages in the image (each one commented)
     hooks/         Build-time setup: user, auto-login, sudo rules, OS identity
     includes.chroot/  Files copied into the image, including the root helpers in
-                   usr/local/sbin (litelink-storage, litelink-state, litelink-restore)
+                   usr/local/sbin (litelink-storage, litelink-state, litelink-restore,
+                   litelink-media, litelink-vpn)
 shell/             The desktop shell (Python 3 + GTK 3)
   main.py
   theme.css
@@ -164,7 +179,8 @@ Makefile
   a black frame.
 - **Shell:** a single full-screen GTK window for the desktop, dock, flyouts, settings and
   connection screens. Connections are stored in `~/.config/litelink`.
-- **Root actions** (network, time, Bluetooth radio, storage and install) go through a few
+- **Root actions** (network, VPN tunnels, reading USB drives, time, Bluetooth radio,
+  storage and install) go through a few
   small helpers that the shell may run with `sudo`. Nothing else gets root.
 - **Saved settings:** live-boot's persistence restores only chosen folders from the
   settings partition: the shell's settings, NetworkManager connections, Bluetooth

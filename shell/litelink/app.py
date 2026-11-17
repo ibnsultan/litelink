@@ -420,16 +420,50 @@ class Shell(Gtk.Window):
             return
         pw = password if password is not None else conn.get("password", "")
         layer = self.push_layer(screens.connecting(self, conn), "dark", closable=False)
-        try:
-            self.session = Session(conn, pw, lambda *a: self._session_ended(conn, layer, *a),
-                                   username=username, domain=domain, ignore_cert=ignore_cert)
-        except OSError as e:
-            self.pop_layer(layer)
-            self.push_layer(screens.error(self, conn, "unreachable", 255, str(e)), "dark")
+
+        def launch():
+            try:
+                self.session = Session(conn, pw, lambda *a: self._session_ended(conn, layer, *a),
+                                       username=username, domain=domain, ignore_cert=ignore_cert)
+            except OSError as e:
+                self.pop_layer(layer)
+                self.push_layer(screens.error(self, conn, "unreachable", 255, str(e)), "dark")
+
+        if not conn.get("vpn"):
+            launch()
+            return
+        # Private network: bring the connection's WireGuard tunnel up first (if it isn't already)
+        wait = self._vpn_wait = {"layer": layer, "cancelled": False}
+
+        def bring_up():
+            t = next((x for x in system.vpn_list() if x["uuid"] == conn["vpn"]), None)
+            if t is None:
+                return False, "The tunnel was removed. Choose another one in the connection's settings.", ""
+            if t["active"]:
+                return True, "", t["name"]
+            ok, err = system.vpn_set(t["uuid"], True)
+            return ok, err, t["name"]
+
+        def ready(res):
+            ok, err, name = res
+            if wait["cancelled"] or self._vpn_wait is not wait:
+                return
+            self._vpn_wait = None
+            if ok:
+                launch()
+            else:
+                self.pop_layer(layer)
+                self.push_layer(screens.error(self, conn, "vpn", 0, err, extra={"vpn_name": name or "VPN"}),
+                                "dark")
+        system.in_background(bring_up, ready)
 
     def cancel_session(self):
         if self.session:
             self.session.cancel()
+        elif getattr(self, "_vpn_wait", None):        # still bringing the VPN up
+            self._vpn_wait["cancelled"] = True
+            self.pop_layer(self._vpn_wait["layer"])
+            self._vpn_wait = None
 
     def _session_ended(self, conn, layer, kind, code, text, seconds):
         from . import screens

@@ -7,8 +7,8 @@ from . import system, ui
 from .config import DEFAULT_CONNECTION, normalize
 
 SETTINGS_GROUPS = [
-    ("Connectivity", [("network", "Network", "network"), ("bluetooth", "Bluetooth", "bluetooth"),
-                      ("remote", "Remote connections", "remote")]),
+    ("Connectivity", [("network", "Network", "network"), ("vpn", "VPN", "vpn"),
+                      ("bluetooth", "Bluetooth", "bluetooth"), ("remote", "Remote connections", "remote")]),
     ("Device", [("display", "Display", "display"), ("keyboard", "Keyboard & input", "keyboard"),
                 ("sound", "Sound", "sound"), ("time", "Time & region", "time")]),
     # Before installing this is where you install; afterwards it's settings storage
@@ -18,7 +18,7 @@ SETTINGS_GROUPS = [
 ]
 
 # Settings panels that exist today; the others are shown disabled until built.
-READY_PANELS = {"network", "display", "bluetooth", "time", "storage", "about"}
+READY_PANELS = {"network", "vpn", "display", "bluetooth", "time", "storage", "about"}
 
 RESOLUTIONS = [("fullscreen", "Full screen (match monitor)"), ("1920x1080", "1920 × 1080"),
                ("1600x900", "1600 × 900"), ("1280x800", "1280 × 800"), ("1024x768", "1024 × 768")]
@@ -228,6 +228,17 @@ class ConnectionDialog(Gtk.Box):
         grid.attach(field("Password", self.e_pass), 1, 2, 1, 1)
         grid.attach(field("Domain", self.e_domain, optional=True), 0, 3, 1, 1)
         grid.attach(field("RD Gateway", self.e_gw, optional=True), 1, 3, 1, 1)
+        # Private network: a WireGuard tunnel from Settings > VPN, brought up first
+        tunnels = system.vpn_list()
+        opts = [("", "None")] + [(t["uuid"], t["name"]) for t in tunnels]
+        current = c.get("vpn", "") if any(t["uuid"] == c.get("vpn") for t in tunnels) else ""
+        self.cb_vpn = combo(opts, current)
+        vpn_box = field("VPN", self.cb_vpn, optional=True)
+        vpn_box.pack_start(ui.label("Connects first when this connection opens" if tunnels else
+                                    "Add tunnels in Settings › VPN", "muted small"), False, False, 0)
+        if not tunnels:
+            self.cb_vpn.set_sensitive(False)
+        grid.attach(vpn_box, 0, 4, 2, 1)
         g.pack_start(grid, False, False, 0)
         self.c_auto = Gtk.CheckButton(label="Connect automatically at startup", active=c["auto"])
         self.c_reconnect = Gtk.CheckButton(label="Reconnect when the session ends", active=c["reconnect"])
@@ -286,6 +297,7 @@ class ConnectionDialog(Gtk.Box):
             "password": self.e_pass.get_text(),
             "domain": self.e_domain.get_text().strip(),
             "gateway": self.e_gw.get_text().strip(),
+            "vpn": self.cb_vpn.get_active_id() or "",
             "auto": self.c_auto.get_active(),
             "reconnect": self.c_reconnect.get_active(),
         })
@@ -389,7 +401,14 @@ class SettingsWindow(Gtk.Box):
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18, margin_top=24, margin_bottom=24,
                        margin_start=28, margin_end=28)
         titles = {k: t for _g, items in SETTINGS_GROUPS for k, t, _i in items}
-        page.pack_start(ui.label(titles.get(key, ""), "h3"), False, False, 0)
+        # Page header: title (+ description underneath) on the left, the page's
+        # action on the title's line at the right (see set_header)
+        self.head = Gtk.Grid(column_spacing=24, row_spacing=6)
+        title = ui.label(titles.get(key, ""), "h3")
+        title.set_hexpand(True)
+        title.set_valign(Gtk.Align.CENTER)
+        self.head.attach(title, 0, 0, 1, 1)
+        page.pack_start(self.head, False, False, 0)
         builder = getattr(self, f"_panel_{key}", None)
         if builder:
             builder(page)
@@ -400,6 +419,17 @@ class SettingsWindow(Gtk.Box):
             page.pack_start(ph, True, True, 0)
         self.content.add(page)
         self.content.show_all()
+
+    def set_header(self, desc=None, action=None):
+        """Panel header extras: a description under the title (it ends where the
+        action starts) and an action button on the title's line."""
+        if action is not None:
+            action.set_valign(Gtk.Align.CENTER)
+            self.head.attach(action, 1, 0, 1, 1)
+        if desc:
+            d = ui.label(desc, "muted body", wrap=True)
+            d.set_max_width_chars(80)
+            self.head.attach(d, 0, 1, 1, 1)
 
     # -- panels -------------------------------------------------------------
     def _kv(self, rows, key_width=160):
@@ -726,6 +756,10 @@ class SettingsWindow(Gtk.Box):
         if "audio" in kind or "head" in kind:
             return "headset"
         return "device"
+
+    def _panel_vpn(self, page):
+        from . import vpn
+        vpn.panel(self, page)
 
     def _panel_bluetooth(self, page):
         ad = system.bt_adapter()

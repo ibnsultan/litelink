@@ -22,6 +22,7 @@ DEFAULT_CONNECTION = {
     "password": "",          # empty = ask when connecting
     "domain": "",
     "gateway": "",
+    "vpn": "",               # WireGuard tunnel (NetworkManager uuid) brought up before connecting
     "auto": False,           # connect at startup
     "reconnect": True,       # reconnect when the session ends
     "ignore_cert": False,    # set when the user chose "remember this certificate"

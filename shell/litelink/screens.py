@@ -216,16 +216,21 @@ ERRORS = {
                         color="amber", icon="shield", fg="#2B1A00"),
     "ended": dict(title="Session ended", body="The connection to {name} was lost.",
                   color="blue", icon="reconnect", fg="#FFFFFF"),
+    "vpn": dict(title="Couldn’t connect the VPN",
+                body="{name} is reached through the {vpn_name} tunnel, which couldn’t be connected. "
+                     "Check the network connection, then try again.",
+                color="amber", icon="vpn", fg="#2B1A00"),
 }
 
 
-def error(app, conn, kind, code, details):
+def error(app, conn, kind, code, details, extra=None):
     spec = ERRORS.get(kind, ERRORS["unreachable"])
+    fmt = dict(conn, **(extra or {}))
     col = _column(12)
     col.set_size_request(520, -1)
     col.pack_start(_kite_badge(spec["color"], spec["icon"], spec["fg"]), False, False, 0)
-    col.pack_start(_center(spec["title"].format(**conn), "h1"), False, False, 0)
-    col.pack_start(_center(spec["body"].format(**conn), "sub"), False, False, 0)
+    col.pack_start(_center(spec["title"].format(**fmt), "h1"), False, False, 0)
+    col.pack_start(_center(spec["body"].format(**fmt), "sub"), False, False, 0)
     buttons = Gtk.Box(spacing=10, halign=Gtk.Align.CENTER, margin_top=22)
     state = {"timer": None}
 
@@ -288,7 +293,7 @@ def error(app, conn, kind, code, details):
     col.pack_start(buttons, False, False, 0)
 
     # Show details: the raw FreeRDP result, for IT
-    text = f"xfreerdp3 exit code {code}"
+    text = "WireGuard (NetworkManager)" if kind == "vpn" else f"xfreerdp3 exit code {code}"
     if details.strip():
         text += "\n" + "\n".join(details.strip().splitlines()[-6:])
     rev = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_DOWN)

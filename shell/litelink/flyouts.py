@@ -62,6 +62,35 @@ def network(app):
     wifi.pack_start(sw, False, False, 0)
     card.pack_start(Gtk.Separator(), False, False, 0)
     card.pack_start(wifi, False, False, 0)
+
+    # VPN: which tunnel is up (filled in the background); opens Settings > VPN
+    card.pack_start(Gtk.Separator(), False, False, 0)
+    vpn_btn = ui.add_class(Gtk.Button(), "flyout-row")
+    vrow = Gtk.Box(spacing=8)
+    vcol = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+    vcol.pack_start(ui.label("VPN", "body"), False, False, 0)
+    vstat = ui.label(" ", "faint small")
+    vcol.pack_start(vstat, False, False, 0)
+    vrow.pack_start(vcol, True, True, 0)
+    vrow.pack_start(ui.icon("chev_right", 16, "#8A8F98", 2), False, False, 0)
+    vpn_btn.add(vrow)
+    vpn_btn.connect("clicked", lambda *_: app.open_settings("vpn"))
+    card.pack_start(vpn_btn, False, False, 0)
+
+    def fill(tunnels):
+        if vstat.get_ancestor(Gtk.Window) is None:      # menu closed meanwhile
+            return
+        up = [t["name"] for t in tunnels if t["active"]]
+        ctx = vstat.get_style_context()
+        ctx.remove_class("faint")
+        if up:
+            vstat.set_text(f"{', '.join(up)} · connected")
+            ctx.add_class("ok")
+        else:
+            vstat.set_text("Not connected" if tunnels else "No tunnels")
+            ctx.add_class("muted")
+    sysinfo.in_background(sysinfo.vpn_list, fill)
+
     card.pack_start(_link("Network settings", lambda: app.open_settings("network")), False, False, 0)
     return card, _bottom(3)
 

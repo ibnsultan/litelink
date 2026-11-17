@@ -1,0 +1,258 @@
+#!/usr/bin/python3
+"""LiteLink OS: WireGuard tunnels (run as root via sudo by the shell).
+
+  litelink-vpn list                 JSON: tunnels, without secrets
+  litelink-vpn save   < JSON        add a tunnel, or replace one when "uuid" is given
+  litelink-vpn remove UUID
+  litelink-vpn up UUID | down UUID
+  litelink-vpn autoconnect UUID on|off
+
+Tunnels are NetworkManager WireGuard connections, so they're kept with the
+other network settings (/etc/NetworkManager/system-connections is part of
+settings storage). Details arrive as JSON on stdin so keys never appear in the
+process list:
+
+  {"uuid": "", "name": "Office VPN", "private_key": "...", "address": "10.8.0.2/32",
+   "dns": "10.8.0.1", "public_key": "...", "endpoint": "vpn.example.com:51820",
+   "allowed_ips": "10.0.0.0/8, 192.168.10.0/24", "preshared_key": "", "keepalive": "25",
+   "autoconnect": false}
+
+When replacing a tunnel, an empty private_key / preshared_key keeps the old one.
+Errors: exit 1 with "ERROR <message for the user>" on stderr.
+"""
+import configparser
+import glob
+import ipaddress
+import json
+import os
+import re
+import subprocess
+import sys
+
+CONN_DIR = "/etc/NetworkManager/system-connections"
+TMP = "/run/litelink/vpn"
+KEY = re.compile(r"^[A-Za-z0-9+/]{43}=$")
+ENDPOINT = re.compile(r"^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+):(\d{1,5})$")
+
+
+class UserError(Exception):
+    pass
+
+
+def nmcli(*args, timeout=20):
+    r = subprocess.run(["nmcli", *args], capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        raise UserError((r.stderr or r.stdout).strip().replace("Error: ", "")[:200] or "NetworkManager refused")
+    return r.stdout.strip()
+
+
+# ---------------------------------------------------------------- reading
+def keyfiles():
+    """WireGuard keyfiles -> [(path, ConfigParser)]"""
+    result = []
+    for path in glob.glob(os.path.join(CONN_DIR, "*.nmconnection")):
+        cp = configparser.ConfigParser(interpolation=None, strict=False)
+        cp.optionxform = str
+        try:
+            cp.read(path)
+        except configparser.Error:
+            continue
+        if cp.get("connection", "type", fallback="") == "wireguard":
+            result.append((path, cp))
+    return result
+
+
+def _list(value):
+    return [x for x in re.split(r"[;,\s]+", value or "") if x]
+
+
+def describe(cp, active):
+    uuid = cp.get("connection", "uuid", fallback="")
+    iface = cp.get("connection", "interface-name", fallback="")
+    peers = [s for s in cp.sections() if s.startswith("wireguard-peer.")]
+    peer = cp[peers[0]] if peers else {}
+    addrs = [cp.get("ipv4", k) for k in cp.options("ipv4") if re.match(r"address\d+$", k)] if cp.has_section("ipv4") else []
+    addrs += [cp.get("ipv6", k) for k in cp.options("ipv6") if re.match(r"address\d+$", k)] if cp.has_section("ipv6") else []
+    dns = _list(cp.get("ipv4", "dns", fallback="")) + _list(cp.get("ipv6", "dns", fallback=""))
+    up = uuid in active
+    rx = tx = 0
+    if up and iface:
+        try:
+            rx = int(open(f"/sys/class/net/{iface}/statistics/rx_bytes").read())
+            tx = int(open(f"/sys/class/net/{iface}/statistics/tx_bytes").read())
+        except (OSError, ValueError):
+            pass
+    return {
+        "uuid": uuid, "name": cp.get("connection", "id", fallback=iface), "iface": iface,
+        "autoconnect": cp.get("connection", "autoconnect", fallback="true") != "false",
+        "active": up, "rx": rx, "tx": tx,
+        "address": ", ".join(a.split(",")[0] for a in addrs),
+        "dns": ", ".join(dns),
+        "public_key": peers[0].split(".", 1)[1] if peers else "",
+        "endpoint": peer.get("endpoint", ""),
+        "allowed_ips": ", ".join(_list(peer.get("allowed-ips", ""))),
+        "keepalive": peer.get("persistent-keepalive", ""),
+        "has_preshared_key": bool(peer.get("preshared-key", "")),
+    }
+
+
+def active_uuids():
+    try:
+        return set(nmcli("-t", "-g", "UUID", "connection", "show", "--active").split())
+    except UserError:
+        return set()
+
+
+def find(uuid):
+    for path, cp in keyfiles():
+        if cp.get("connection", "uuid", fallback="") == uuid:
+            return path, cp
+    raise UserError("That tunnel no longer exists")
+
+
+# ---------------------------------------------------------------- saving
+def check(d, old=None):
+    """Validate the form -> clean values. old: the ConfigParser being replaced."""
+    name = (d.get("name") or "").strip()
+    if not name or len(name) > 64 or any(ord(c) < 32 for c in name):
+        raise UserError("Give the tunnel a name")
+
+    priv = (d.get("private_key") or "").strip()
+    if not priv and old is not None:
+        priv = old.get("wireguard", "private-key", fallback="")
+    if not KEY.match(priv):
+        raise UserError("The private key isn't valid (44 characters ending in =)")
+
+    addresses = []
+    for a in _list(d.get("address")):
+        try:
+            addresses.append(str(ipaddress.ip_interface(a)))
+        except ValueError:
+            raise UserError(f"“{a}” isn't a valid address") from None
+    if not addresses:
+        raise UserError("Enter this device's address, e.g. 10.8.0.2/32")
+
+    dns = []
+    for a in _list(d.get("dns")):
+        try:
+            dns.append(str(ipaddress.ip_address(a)))
+        except ValueError:
+            raise UserError(f"“{a}” isn't a valid DNS server") from None
+
+    pub = (d.get("public_key") or "").strip()
+    if not KEY.match(pub):
+        raise UserError("The server's public key isn't valid (44 characters ending in =)")
+
+    endpoint = (d.get("endpoint") or "").strip()
+    m = ENDPOINT.match(endpoint)
+    if not m or not 0 < int(m.group(2)) < 65536:
+        raise UserError("Enter the server as host:port, e.g. vpn.example.com:51820")
+
+    allowed = []
+    for a in _list(d.get("allowed_ips")):
+        try:
+            allowed.append(str(ipaddress.ip_network(a, strict=False)))
+        except ValueError:
+            raise UserError(f"“{a}” isn't a valid network") from None
+    if not allowed:
+        raise UserError("Enter the networks to reach, e.g. 10.0.0.0/8 (0.0.0.0/0 for all traffic)")
+
+    psk = (d.get("preshared_key") or "").strip()
+    if not psk and old is not None:
+        sec = next((s for s in old.sections() if s.startswith("wireguard-peer.")), None)
+        psk = old.get(sec, "preshared-key", fallback="") if sec else ""
+    if psk and not KEY.match(psk):
+        raise UserError("The preshared key isn't valid (44 characters ending in =)")
+
+    keep = str(d.get("keepalive") or "").strip().split(" ")[0]
+    if keep and (not keep.isdigit() or int(keep) > 65535):
+        raise UserError("Keepalive is a number of seconds, e.g. 25")
+
+    return {"name": name, "priv": priv, "addresses": addresses, "dns": dns, "pub": pub,
+            "endpoint": endpoint, "allowed": allowed, "psk": psk, "keep": keep,
+            "autoconnect": bool(d.get("autoconnect"))}
+
+
+def iface_for(name, keep=None):
+    if keep:
+        return keep
+    used = {cp.get("connection", "interface-name", fallback="") for _p, cp in keyfiles()}
+    used |= set(os.listdir("/sys/class/net")) if os.path.isdir("/sys/class/net") else set()
+    base = "wg-" + (re.sub(r"[^a-z0-9]", "", name.lower())[:10] or "tunnel")
+    cand, n = base, 2
+    while cand in used:
+        cand, n = f"{base[:13]}{n}", n + 1
+    return cand
+
+
+def cmd_save(d):
+    uuid = (d.get("uuid") or "").strip()
+    old_path = old = None
+    if uuid:
+        old_path, old = find(uuid)
+    v = check(d, old)
+    iface = iface_for(v["name"], old.get("connection", "interface-name", fallback=None) if old else None)
+
+    conf = ["[Interface]", f"PrivateKey = {v['priv']}", f"Address = {', '.join(v['addresses'])}"]
+    if v["dns"]:
+        conf.append(f"DNS = {', '.join(v['dns'])}")
+    conf += ["", "[Peer]", f"PublicKey = {v['pub']}"]
+    if v["psk"]:
+        conf.append(f"PresharedKey = {v['psk']}")
+    conf += [f"Endpoint = {v['endpoint']}", f"AllowedIPs = {', '.join(v['allowed'])}"]
+    if v["keep"] and v["keep"] != "0":
+        conf.append(f"PersistentKeepalive = {v['keep']}")
+
+    os.makedirs(TMP, mode=0o700, exist_ok=True)
+    path = os.path.join(TMP, f"{iface}.conf")      # nmcli names the interface after the file
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write("\n".join(conf) + "\n")
+    try:
+        if uuid:
+            nmcli("connection", "delete", uuid)
+        outp = nmcli("connection", "import", "type", "wireguard", "file", path)
+    finally:
+        os.unlink(path)
+    m = re.search(r"\(([0-9a-f-]{36})\)", outp)
+    new = m.group(1) if m else ""
+    if not new:
+        raise UserError("NetworkManager didn't create the tunnel")
+    nmcli("connection", "modify", new, "connection.id", v["name"],
+          "connection.autoconnect", "yes" if v["autoconnect"] else "no")
+    if not v["autoconnect"]:
+        subprocess.run(["nmcli", "connection", "down", new], capture_output=True, timeout=20)
+    print(json.dumps({"uuid": new}))
+
+
+def main():
+    a = sys.argv[1:]
+    try:
+        if a == ["list"]:
+            act = active_uuids()
+            print(json.dumps(sorted((describe(cp, act) for _p, cp in keyfiles()), key=lambda t: t["name"].lower())))
+        elif a == ["save"]:
+            cmd_save(json.loads(sys.stdin.read() or "{}"))
+        elif len(a) == 2 and a[0] == "remove":
+            find(a[1])
+            nmcli("connection", "delete", a[1])
+        elif len(a) == 2 and a[0] in ("up", "down"):
+            find(a[1])
+            nmcli("connection", a[0], a[1], timeout=30)
+        elif len(a) == 3 and a[0] == "autoconnect" and a[2] in ("on", "off"):
+            find(a[1])
+            nmcli("connection", "modify", a[1], "connection.autoconnect", "yes" if a[2] == "on" else "no")
+        else:
+            print(__doc__, file=sys.stderr)
+            return 2
+    except UserError as e:
+        print(f"ERROR {e}", file=sys.stderr)
+        return 1
+    except (subprocess.TimeoutExpired, ValueError, OSError) as e:
+        print(f"ERROR {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
