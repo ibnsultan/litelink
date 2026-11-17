@@ -106,7 +106,7 @@ class Session:
         text = "\n".join(self.stderr)
         seconds = (GLib.get_monotonic_time() - self.started) / 1e6
         kind = "closed" if self.cancelled else classify(code, text)
-        GLib.idle_add(self.on_exit, kind, code, text, seconds)
+        GLib.idle_add(self.on_exit, kind, code, text, seconds, priority=GLib.PRIORITY_DEFAULT)
 
     def cancel(self):
         self.cancelled = True

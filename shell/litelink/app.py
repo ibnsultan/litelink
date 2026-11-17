@@ -30,7 +30,7 @@ def _rgb(hex_):
     return tuple(int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
 
 
-_wall = {"src": None, "scaled": None, "size": None}
+_wall = {"src": None, "surface": None, "offset": (0, 0), "size": None}
 
 
 def _wallpaper():
@@ -52,11 +52,14 @@ def draw_sky(widget, cr):
         if _wall["size"] != (w, h):
             iw, ih = src.get_width(), src.get_height()
             s = max(w / iw, h / ih)
-            _wall["scaled"] = src.scale_simple(max(1, round(iw * s)), max(1, round(ih * s)),
-                                               GdkPixbuf.InterpType.BILINEAR)
+            pb = src.scale_simple(max(1, round(iw * s)), max(1, round(ih * s)),
+                                  GdkPixbuf.InterpType.BILINEAR)
+            # Convert to a cairo surface once; converting the pixbuf on every
+            # redraw is expensive on slow thin clients.
+            _wall["surface"] = Gdk.cairo_surface_create_from_pixbuf(pb, 1, None)
+            _wall["offset"] = ((w - pb.get_width()) // 2, (h - pb.get_height()) // 2)
             _wall["size"] = (w, h)
-        pb = _wall["scaled"]
-        Gdk.cairo_set_source_pixbuf(cr, pb, (w - pb.get_width()) / 2, (h - pb.get_height()) / 2)
+        cr.set_source_surface(_wall["surface"], *_wall["offset"])
         cr.paint()
         return False
     import cairo

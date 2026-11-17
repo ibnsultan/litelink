@@ -282,6 +282,12 @@ scrollbar, scrollbar trough { background: transparent; border: none; box-shadow:
 scrollbar slider { min-width: 4px; min-height: 40px; border: none; border-radius: 999px;
                    background-color: rgba(22, 23, 26, 0.16); margin: 2px; }
 scrollbar slider:hover, scrollbar slider:active { background-color: rgba(22, 23, 26, 0.28); min-width: 6px; }
+/* Installer "Show details": live log */
+.log-scroll { border: 1px solid #E6E8EC; border-radius: 8px; background-color: #F6F7F9; }
+/* Monospace (the theme's Inter would otherwise win); margins are set on the view, not
+   CSS padding, which paints the text view's border area black in GTK 3 */
+textview.log-view, textview.log-view text { background-color: #F6F7F9; color: #3A3F47;
+    font-family: "DejaVu Sans Mono", monospace; font-size: 12px; }
 .wizard-row { padding: 10px 4px; min-height: 40px; }
 .wizard-row-sep { border-bottom: 1px solid #ECEEF2; }
 .wizard-row:disabled label { color: #A3A8B0; }

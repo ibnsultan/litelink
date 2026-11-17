@@ -315,7 +315,10 @@ class FrameAnimation(Gtk.Image):
 
     def _start(self, *_):
         if self.frames and not self.timer:
-            self.timer = GLib.timeout_add(self.interval, self._tick)
+            # Idle priority: on a slow CPU the animation yields to real work
+            # (installer progress, log lines) instead of crowding it out.
+            self.timer = GLib.timeout_add(self.interval, self._tick,
+                                          priority=GLib.PRIORITY_DEFAULT_IDLE)
 
     def _stop(self, *_):
         if self.timer:

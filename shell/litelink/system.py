@@ -302,30 +302,66 @@ def storage_disks():
         return []
 
 
-def storage_run(args, on_progress, on_done):
+def storage_run(args, on_progress, on_done, on_log=None):
     """Run `litelink-storage <args>` (install / usb-setup) without blocking the UI.
-    on_progress(percent, message); on_done(ok, message)."""
+    on_progress(percent, message); on_done(ok, message); on_log(line) gets the
+    detailed output (commands run and what they printed) and anything unexpected."""
     import threading
     from gi.repository import GLib
 
+    def emit(text):
+        if on_log:
+            on_main(on_log, text)
+
+    import time
+    state = {"last": time.time(), "step": "starting", "running": True}
+
+    def heartbeat():
+        # A silent wait (e.g. a command that hangs) shows up in the log instead of a frozen screen
+        while state["running"]:
+            time.sleep(10)
+            quiet = time.time() - state["last"]
+            if state["running"] and quiet >= 30:
+                emit(f"… still working on: {state['step']} (no output for {int(quiet)} s)")
+                state["last"] = time.time()
+
     def worker():
         ok, msg = False, "The helper didn't finish"
+        emit("$ sudo " + " ".join([STORAGE, *args]))
+        threading.Thread(target=heartbeat, daemon=True).start()
         try:
             p = subprocess.Popen(["sudo", "-n", STORAGE, *args], stdout=subprocess.PIPE,
-                                 stderr=subprocess.STDOUT, text=True)
+                                 stderr=subprocess.STDOUT, text=True, bufsize=1)
             for line in p.stdout:
-                line = line.strip()
+                line = line.rstrip("\n")
+                state["last"] = time.time()
+                if line.startswith("LOG $ "):
+                    state["step"] = line[6:]
                 if line.startswith("PROGRESS "):
                     _, pct, *rest = line.split(" ", 2)
-                    GLib.idle_add(on_progress, int(pct), rest[0] if rest else "")
+                    try:
+                        on_main(on_progress, int(pct), rest[0] if rest else "")
+                    except ValueError:
+                        emit(line)
+                elif line.startswith("LOG "):
+                    emit(line[4:])
                 elif line == "DONE":
                     ok, msg = True, ""
                 elif line.startswith("ERROR "):
                     ok, msg = False, line[6:]
-            p.wait()
+                    emit("ERROR " + line[6:])
+                elif line.strip():
+                    emit(line)                   # e.g. a sudo or Python error
+            rc = p.wait()
+            if not ok and not msg.strip():
+                msg = f"The helper stopped (exit status {rc})"
+            if rc != 0 and ok:
+                ok, msg = False, f"The helper stopped (exit status {rc})"
         except OSError as e:
             msg = str(e)
-        GLib.idle_add(lambda: (on_done(ok, msg), False)[1])
+            emit(f"couldn't start the helper: {e}")
+        state["running"] = False
+        on_main(on_done, ok, msg)
     threading.Thread(target=worker, daemon=True).start()
 
 
@@ -452,14 +488,26 @@ def bt_remove(mac):
     _btctl("remove", mac)
 
 
+def on_main(fn, *args):
+    """Run fn(*args) on the GTK main loop, from any thread, at normal priority.
+    Plain GLib.idle_add uses the lowest priority: on a slow CPU (Wyse 3040's Atom)
+    an animation plus its redraws keep the loop busy and such callbacks never run
+    (the installer looked stuck at "Starting…" while it was working)."""
+    from gi.repository import GLib
+
+    def call():
+        fn(*args)
+        return False
+    GLib.idle_add(call, priority=GLib.PRIORITY_DEFAULT)
+
+
 def in_background(work, done):
     """Run work() on a thread, then done(result) on the GTK main loop."""
     import threading
-    from gi.repository import GLib
 
     def runner():
         result = work()
-        GLib.idle_add(lambda: (done(result), False)[1])
+        on_main(done, result)
     threading.Thread(target=runner, daemon=True).start()
 
 

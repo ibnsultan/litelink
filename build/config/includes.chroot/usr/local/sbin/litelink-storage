@@ -49,11 +49,53 @@ BOOT_APPEND = ("boot=live live-media=/dev/disk/by-label/LITELINK persistence per
 
 
 # ---------------------------------------------------------------- helpers
-def run(*cmd, input=None):
-    r = subprocess.run(cmd, capture_output=True, text=True, input=input)
+LOGFILE = "/run/litelink/install.log"
+VERBOSE = False         # install / usb-setup: stream "LOG ..." lines (shown under Show details)
+_last_step = None
+
+
+def log(msg):
+    if not VERBOSE:
+        return
+    print(f"LOG {msg}", flush=True)
+    try:
+        with open(LOGFILE, "a") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+    except OSError:
+        pass
+
+
+def start_log(title):
+    global VERBOSE
+    VERBOSE = True
+    os.makedirs(os.path.dirname(LOGFILE), exist_ok=True)
+    with open(LOGFILE, "w") as f:
+        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {title}\n")
+    print(f"LOG {title}", flush=True)
+
+
+def run(*cmd, input=None, timeout=900):
+    """Run a command (logged with its output); raise with its message on failure."""
+    log("$ " + " ".join(cmd))
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, input=input, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        log(f"  … no answer after {timeout} s")
+        raise RuntimeError(f"{os.path.basename(cmd[0])} didn't finish within {timeout} s") from None
+    for line in ((r.stdout or "") + (r.stderr or "")).strip().splitlines()[-25:]:
+        log("  " + line)
     if r.returncode != 0:
+        log(f"  exit status {r.returncode}")
         raise RuntimeError(f"{os.path.basename(cmd[0])}: {(r.stderr or r.stdout).strip()[:300]}")
     return r.stdout
+
+
+def soft(*cmd, timeout=60):
+    """Like run(), for commands whose failure isn't fatal (partprobe, settle, umount)."""
+    try:
+        run(*cmd, timeout=timeout)
+    except RuntimeError as e:
+        log(f"  (continuing: {e})")
 
 
 def out(*cmd):
@@ -62,7 +104,11 @@ def out(*cmd):
 
 
 def progress(pct, msg):
+    global _last_step
     print(f"PROGRESS {int(pct)} {msg}", flush=True)
+    if msg != _last_step:
+        _last_step = msg
+        log(f"== {msg}")
 
 
 def lsblk(*devs):
@@ -141,9 +187,12 @@ class Mounted:
         return self.path
 
     def __exit__(self, *exc):
-        subprocess.run(["sync"])
-        subprocess.run(["umount", self.path])
-        os.rmdir(self.path)
+        soft("sync", timeout=300)
+        soft("umount", self.path)
+        try:
+            os.rmdir(self.path)
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------- commands
@@ -194,8 +243,8 @@ def cmd_usb_setup():
     last = out("sfdisk", "-d", disk).strip().splitlines()[-1].split(":")[0].strip()
     num = "".join(ch for ch in last[len(disk):] if ch.isdigit())
     if num:
-        subprocess.run(["partx", "-a", "--nr", f"{num}:{num}", disk], capture_output=True)
-    subprocess.run(["udevadm", "settle"])
+        soft("partx", "-a", "--nr", f"{num}:{num}", disk)
+    soft("udevadm", "settle", "--timeout=20", timeout=30)
     after = None
     for _ in range(40):
         kids = {d["path"] for d in (lsblk(disk)[0].get("children") or [])}
@@ -260,27 +309,35 @@ def write_install_choices(data_root, opts):
 
 def cmd_install(disk, opts=None):
     opts = opts or {"mode": "standard", "features": ["rdp"], "maintenance": False}
+    progress(1, "Checking the disk")
+    log(f"target {disk} · mode {opts['mode']} · protocols {','.join(opts['features'])} · "
+        f"maintenance {'on' if opts['maintenance'] else 'off'}")
     if not disk.startswith("/dev/") or not os.path.exists(disk):
         raise RuntimeError(f"no such disk: {disk}")
-    if disk == medium_disk():
+    medium = medium_disk()
+    log(f"running from {medium or 'unknown'} ({out('findmnt', '-no', 'SOURCE', MEDIUM) or 'no medium'})")
+    if disk == medium:
         raise RuntimeError("that's the disk LiteLink is running from")
     if not os.path.isdir(os.path.join(MEDIUM, "live")):
         raise RuntimeError("the LiteLink system files weren't found")
+    for line in out("lsblk", "-o", "NAME,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINT", disk).splitlines():
+        log("  " + line)
 
     progress(2, "Preparing the disk")
     for line in out("lsblk", "-nrpo", "NAME,MOUNTPOINT", disk).splitlines():
         parts = line.split(None, 1)
         if len(parts) == 2 and parts[1]:
-            subprocess.run(["umount", "-l", parts[1]])
-    run("wipefs", "-a", disk)
-    run("sgdisk", "--zap-all", disk)
+            soft("umount", "-l", parts[1])
+    run("wipefs", "-a", disk, timeout=120)
+    run("sgdisk", "--zap-all", disk, timeout=120)
     run("sgdisk", "-n1:0:+256M", "-t1:ef00", "-c1:EFI",
         "-n2:0:+3G", "-t2:8300", "-c2:LITELINK",
-        "-n3:0:0", "-t3:8300", "-c3:litelink-data", disk)
-    subprocess.run(["partprobe", disk])
-    subprocess.run(["udevadm", "settle"])
+        "-n3:0:0", "-t3:8300", "-c3:litelink-data", disk, timeout=120)
+    soft("partprobe", disk, timeout=60)
+    soft("udevadm", "settle", "--timeout=20", timeout=30)
     p1, p2, p3 = (partition(disk, n) for n in (1, 2, 3))
     for p in (p1, p2, p3):
+        log(f"waiting for {p}")
         wait_for(p)
 
     progress(8, "Formatting")
@@ -298,6 +355,7 @@ def cmd_install(disk, opts=None):
     with Mounted(p2, "ext4") as sysroot:
         os.makedirs(os.path.join(sysroot, "live"))
         for f in files:
+            log(f"copying {f} ({os.path.getsize(os.path.join(src, f)) // 1_000_000} MB)")
             with open(os.path.join(src, f), "rb") as fi, open(os.path.join(sysroot, "live", f), "wb") as fo:
                 while True:
                     chunk = fi.read(8 * 1024 * 1024)
@@ -330,7 +388,8 @@ def cmd_install(disk, opts=None):
     with Mounted(p3, "ext4") as data:
         write_persistence(data, copy_current=True)
         write_install_choices(data, opts)
-    subprocess.run(["sync"])
+    soft("sync", timeout=300)
+    log(f"finished · log saved in {LOGFILE}")
     progress(100, "Done")
 
 
@@ -378,15 +437,18 @@ def main():
         elif cmd == "disks":
             cmd_disks()
         elif cmd == "usb-setup":
+            start_log("Setting up settings storage on the USB stick")
             cmd_usb_setup()
             print("DONE", flush=True)
         elif cmd == "install" and len(sys.argv) >= 3:
+            start_log("Installing LiteLink OS")
             cmd_install(*parse_install_args(sys.argv[2:]))
             print("DONE", flush=True)
         else:
             print(__doc__, file=sys.stderr)
             return 2
     except Exception as e:  # noqa: BLE001 - every failure is reported to the UI
+        log(f"FAILED: {e}")
         print(f"ERROR {e}", flush=True)
         return 1
     return 0

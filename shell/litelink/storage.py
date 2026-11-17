@@ -100,6 +100,78 @@ def usb_setup(app, settings=None):
     app.push_layer(outer, "light")
 
 
+# ---------------------------------------------------------------- live log ("Show details")
+class LogView(Gtk.Box):
+    """A "Show details" link that opens a read-only, monospace log. New lines
+    are appended live; it follows the end unless the user scrolled up."""
+
+    def __init__(self, lines=None, open_=False):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.lines = list(lines or [])
+        self.toggle = ui.add_class(Gtk.Button(label=""), "link-btn")
+        self.toggle.set_halign(Gtk.Align.CENTER)
+        self.toggle.connect("clicked", lambda *_: self.set_open(not self.rev.get_reveal_child()))
+        self.pack_start(self.toggle, False, False, 0)
+        self.rev = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_DOWN)
+        self.scroll = ui.add_class(Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER), "log-scroll")
+        self.scroll.set_size_request(-1, 170)
+        self.view = ui.add_class(Gtk.TextView(editable=False, cursor_visible=False, monospace=True,
+                                              wrap_mode=Gtk.WrapMode.CHAR), "log-view")
+        for side in ("left", "right", "top", "bottom"):
+            getattr(self.view, f"set_{side}_margin")(10 if side in ("left", "right") else 8)
+        self.buf = self.view.get_buffer()
+        self.buf.set_text("\n".join(self.lines))
+        # Follow the end until the user scrolls up; scrolling back down resumes.
+        # Only a real user scroll (wheel, scrollbar) may stop following: the
+        # text view also moves the position while it lays out new lines.
+        self.follow = True
+        self.user = False
+        adj = self.scroll.get_vadjustment()
+        adj.connect("changed", lambda a: self.follow and self._to_end())
+        adj.connect("value-changed", self._scrolled)
+        for w in (self.scroll, self.scroll.get_vscrollbar()):
+            w.connect("scroll-event", self._user_scroll)
+        bar = self.scroll.get_vscrollbar()
+        bar.connect("button-press-event", self._user_scroll)
+        bar.connect("button-release-event", lambda *_: (setattr(self, "user", False), False)[1])
+        self.scroll.add(self.view)
+        self.rev.add(self.scroll)
+        self.pack_start(self.rev, False, False, 0)
+        self.set_open(open_)
+
+    def set_open(self, on):
+        self.rev.set_reveal_child(on)
+        self.toggle.set_label("Hide details" if on else "Show details")
+        if on:
+            self.follow = True
+            self._to_end()
+
+    def _user_scroll(self, *_):
+        self.user = True
+        GLib.timeout_add(300, lambda: (setattr(self, "user", self.user and
+                                               self.scroll.get_vscrollbar().has_grab()), False)[1])
+        return False
+
+    def _scrolled(self, adj):
+        at_end = adj.get_value() >= adj.get_upper() - adj.get_page_size() - 4
+        if self.user:
+            self.follow = at_end
+        elif self.follow and not at_end:
+            self._to_end()
+
+    def _to_end(self):
+        # Set directly (no idle callback, which a busy main loop on slow
+        # hardware may never get to); "changed" calls this again after layout.
+        adj = self.scroll.get_vadjustment()
+        adj.set_value(adj.get_upper() - adj.get_page_size())
+
+    def append(self, line):
+        self.lines.append(line)
+        self.buf.insert(self.buf.get_end_iter(), ("\n" if self.buf.get_char_count() else "") + line)
+        if self.follow:
+            self._to_end()
+
+
 # ---------------------------------------------------------------- installer
 STEPS = [("welcome", "Welcome"), ("time", "Time & region"), ("features", "Features"),
          ("disk", "Storage"), ("confirm", "Confirm"), ("progress", "Install"), ("done", "Finish")]
@@ -428,6 +500,9 @@ class Installer:
         box.pack_start(bar, False, False, 0)
         box.pack_start(ui.label("Don't turn off the device or remove the USB stick.", "faint small", xalign=0.5),
                        False, False, 0)
+        # Show details: what the installer is doing right now (commands and their output)
+        self.log = LogView()
+        box.pack_start(self.log, False, False, 0)
         if self.layer:
             self.layer["closable"] = False        # no Esc / right-click while installing
         self._buttons(None)
@@ -439,7 +514,8 @@ class Installer:
 
         feats = ",".join(k for k, *_ in PROTOCOLS if k in self.features)
         system.storage_run(["install", self.disk["path"], "--mode", self.mode, "--features", feats,
-                            "--maintenance", "on" if self.maintenance else "off"], prog, self._step_done)
+                            "--maintenance", "on" if self.maintenance else "off"], prog, self._step_done,
+                           on_log=self.log.append)
 
     # -- 5. finish / failed
     def _step_done(self, ok, err):
@@ -459,6 +535,11 @@ class Installer:
             det.set_selectable(True)
             det.set_max_width_chars(62)
             box.pack_start(det, False, False, 0)
+            # The whole log, already open, for IT (also saved on the USB system)
+            log = LogView(lines=getattr(self, "log", None) and self.log.lines, open_=True)
+            box.pack_start(log, False, False, 0)
+            box.pack_start(ui.label("The log is also saved in /run/litelink/install.log until restart.",
+                                    "faint small"), False, False, 0)
             self._buttons(ui.button("Close", "btn", self.close),
                           ui.button("Try again", "btn btn-primary", self._step_disk))
         self._show("done")
