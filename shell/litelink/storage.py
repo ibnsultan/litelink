@@ -413,7 +413,7 @@ class Installer:
         # Header: label + Refresh (re-scan after plugging in or swapping a disk)
         head = Gtk.Box(margin_top=4)
         head.pack_start(ui.label("Available disks", "field-label"), True, True, 0)
-        refresh = ui.button("Refresh", "btn btn-sm", self._step_disk, icon_name="reconnect", icon_color="#3A3F47")
+        refresh = ui.button("Refresh", "btn btn-sm", self._step_disk)
         refresh.set_valign(Gtk.Align.CENTER)
         head.pack_end(refresh, False, False, 0)
         box.pack_start(head, False, False, 0)

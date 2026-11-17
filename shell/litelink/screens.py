@@ -263,7 +263,7 @@ def error(app, conn, kind, code, details):
         reconnect = lambda: app.start_session(conn)
         if conn.get("reconnect"):
             # The countdown rides in the button: "Reconnect now | 5"
-            btn, count = ui.count_button("Reconnect now", "btn pill btn-primary", reconnect, "reconnect")
+            btn, count = ui.count_button("Reconnect now", "btn pill btn-primary", reconnect)
             buttons.pack_start(btn, False, False, 0)
             left = {"n": 5}
 
