@@ -6,7 +6,7 @@ stick or installs to a small internal disk. Device setup, including networking, 
 and installation, is handled within the OS, so it can be deployed and used without
 command-line knowledge.
 
-Litelink version 2.0 (code named **Siamese**) is in active development. It is a rewrite on
+Litelink 2 (code named **Siamese**) is in active development. It is a rewrite on
 Debian 13 and replaces the original Ubuntu 18.04 image. alot of things are unfinished; please
 [report issues](https://github.com/ibnsultan/LiteLink-OS/issues) you run into.
 
