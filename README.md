@@ -15,7 +15,9 @@ Debian 13 and replaces the original Ubuntu 18.04 image. alot of things are unfin
 - **Remote desktop connections.** Each saved connection appears as a tile on the desktop.
   RDP is handled by FreeRDP 3, and LiteLink shows its own screens while connecting and when
   a sign-in fails, a certificate isn't trusted or a session drops.
-- **Small footprint.** The ISO is about 760 MB. An installed system fits on a 2 GB Disk
+- **Small footprint.** The ISO is about 925 MB, including the optional browser engine for
+  Web kiosk. An installed system fits on a 2 GB disk, and is about 140 MB smaller without
+  Web kiosk.
 - **Quiet start-up.** The boot menu, splash, desktop and power screens use LiteLink's own
   artwork instead of console text.
 - **Settings.** Wi-Fi and Ethernet (including static IP and DNS), Bluetooth, display
