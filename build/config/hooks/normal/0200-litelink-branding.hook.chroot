@@ -2,8 +2,8 @@
 # OS identity, boot splash and a silent console.
 set -e
 
-VERSION_ID=2.1.0
-VERSION="2.1.0 (Siamese)"
+VERSION_ID=2.2.0
+VERSION="2.2.0 (Siamese)"
 
 # --- OS identity ---------------------------------------------------------
 cat > /usr/lib/os-release <<EOF
