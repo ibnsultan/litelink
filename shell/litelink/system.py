@@ -1065,6 +1065,81 @@ def dot1x_set(connection, s):
     return ok and run(["nmcli", "connection", "up", connection], timeout=30, sudo=True)[0] == 0
 
 
+# ---------------------------------------------------------------- automatic time zone
+TZ_LOOKUPS = ("https://ipapi.co/timezone/", "http://ip-api.com/line/?fields=timezone")
+
+
+def physical_uplink():
+    """The hardware adapter (Ethernet, Wi-Fi, USB modem) the main default route
+    goes out of, or '' when there's none. VPN tunnels have no hardware behind
+    them (/sys/class/net/DEV/device), so they're never picked."""
+    for fam in ("-4", "-6"):
+        rc, out = run(["ip", fam, "route", "show", "table", "main", "default"])
+        for line in out.splitlines():
+            m = re.search(r"\bdev (\S+)", line)
+            if m and os.path.exists(f"/sys/class/net/{m.group(1)}/device"):
+                return m.group(1)
+    return ""
+
+
+def _fetch_via(url, dev, timeout=6):
+    """GET url with the socket bound to network adapter dev (SO_BINDTODEVICE:
+    allowed without root for a fresh socket since Linux 5.7). A bound socket
+    skips a VPN's catch-all route, so the request leaves through dev itself."""
+    import http.client
+    import socket
+    import ssl
+    import urllib.parse
+    u = urllib.parse.urlsplit(url)
+    https = u.scheme == "https"
+    port = u.port or (443 if https else 80)
+    sock, err = None, OSError("no address")
+    for fam, typ, proto, _c, addr in socket.getaddrinfo(u.hostname, port, type=socket.SOCK_STREAM):
+        s = socket.socket(fam, typ, proto)
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, dev.encode())
+            s.settimeout(timeout)
+            s.connect(addr)
+            sock = s
+            break
+        except OSError as e:
+            err = e
+            s.close()
+    if sock is None:
+        raise err
+    if https:
+        sock = ssl.create_default_context().wrap_socket(sock, server_hostname=u.hostname)
+    cls = http.client.HTTPSConnection if https else http.client.HTTPConnection   # right Host header
+    conn = cls(u.hostname, port, timeout=timeout)
+    conn.sock = sock                    # already connected (and encrypted): use it as is
+    try:
+        conn.request("GET", (u.path or "/") + (f"?{u.query}" if u.query else ""),
+                     headers={"User-Agent": "LiteLink", "Connection": "close"})
+        r = conn.getresponse()
+        if r.status != 200:
+            raise OSError(f"HTTP {r.status}")
+        return r.read(100)
+    finally:
+        conn.close()
+
+
+def lookup_timezone():
+    """The time zone for this device's public IP address ('' if unknown).
+    The request goes out through the hardware adapter, never a VPN tunnel: a
+    tunnel's exit point may be in another country."""
+    dev = physical_uplink()
+    if not dev:
+        return ""                       # no network
+    for url in TZ_LOOKUPS:
+        try:
+            tz = _fetch_via(url, dev).decode("ascii", "replace").strip()
+        except Exception:  # noqa: BLE001 - any failure: try the next service
+            continue
+        if re.fullmatch(r"[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*", tz) and os.path.exists(f"/usr/share/zoneinfo/{tz}"):
+            return tz
+    return ""
+
+
 # ---------------------------------------------------------------- display
 def displays():
     """-> list of dict(output, current, modes=[...], rate) for connected outputs."""

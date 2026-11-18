@@ -802,17 +802,30 @@ class SettingsWindow(Gtk.Box):
             sub = "Uses internet time servers"
         self._list_row(g, "Automatic date & time", sub, auto)
 
-        auto_tz = Gtk.Switch(active=False, valign=Gtk.Align.CENTER)
-        r = self._list_row(g, "Automatic time zone", "Requires location services", auto_tz, enabled=False)
-        r.set_tooltip_text("Not supported yet")
+        tz_on = bool(cfg.data.get("auto_timezone"))
+        auto_tz = Gtk.Switch(active=tz_on, valign=Gtk.Align.CENTER)
+        failed = getattr(self.app, "auto_tz_failed", False)
+        self._list_row(g, "Automatic time zone",
+                       "Couldn’t find it: no internet connection? It’s tried again at startup." if tz_on and failed
+                       else "Found from this device’s internet address (ipapi.co) at startup", auto_tz)
+
+        def tz_toggled(s, *_):
+            cfg.data["auto_timezone"] = s.get_active()
+            cfg.save()
+            if s.get_active():
+                s.set_sensitive(False)
+                system.in_background(self.app.auto_timezone_now, lambda _tz: self.show("time"))
+            else:
+                self.show("time")
+        auto_tz.connect("notify::active", tz_toggled)
 
         now = _t.localtime()
         from .config import fmt_time
         stamp = f"{_t.strftime('%-d %b %Y', now)}, {fmt_time(cfg.data, now)}"
         self._list_row(g, "Date & time", None, self._value(stamp), on_click=self._set_time_dialog,
                        enabled=not st["ntp"])
-        self._list_row(g, "Time zone", None, self._value(self._tz_label(st["timezone"])),
-                       on_click=self._tz_picker)
+        self._list_row(g, "Time zone", "Set automatically" if tz_on else None,
+                       self._value(self._tz_label(st["timezone"])), on_click=self._tz_picker, enabled=not tz_on)
         servers = system.ntp_servers()
         self._list_row(g, "Time servers", "Use your organisation's servers if public ones are blocked",
                        self._value(", ".join(servers) if servers else "Automatic"),

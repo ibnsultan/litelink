@@ -599,6 +599,8 @@ class Shell(Gtk.Window):
     def autostart(self):
         self._restore_display()
         self._start_input()
+        if self.cfg.data.get("auto_timezone"):
+            self._auto_timezone_retry(tries=10)
         # Boot menu "Install LiteLink OS" -> open the installer straight away
         if system.boot_option("litelink.install"):
             from .storage import Installer
@@ -630,6 +632,23 @@ class Shell(Gtk.Window):
             self._input_ids = ids
         system.in_background(work, done)
         return True
+
+    # -- Automatic time zone ---------------------------------------------------
+    def auto_timezone_now(self):
+        """Look the time zone up and apply it (blocking: call in the background). -> zone or ''"""
+        tz = system.lookup_timezone()
+        self.auto_tz_failed = not tz
+        if tz and tz != system.time_status()["timezone"]:
+            system.set_timezone(tz)
+            system.on_main(self._tick_clock)
+        return tz
+
+    def _auto_timezone_retry(self, tries):
+        """At startup the network may not be up yet: try every 30 s a few times."""
+        def done(tz):
+            if not tz and tries > 1 and self.cfg.data.get("auto_timezone"):
+                GLib.timeout_add_seconds(30, lambda: (self._auto_timezone_retry(tries - 1), False)[1])
+        system.in_background(self.auto_timezone_now, done)
 
     def _restore_display(self):
         """Re-apply a resolution the user kept (saved with persistent settings)."""
