@@ -2,7 +2,7 @@
 card lines up with its dock button."""
 from gi.repository import GLib, Gtk
 
-from . import system as sysinfo, ui
+from . import system as sysinfo, ui, wifi
 
 STEP = 68      # dock button + gap
 SEP = 13       # separator between the status and system groups
@@ -54,14 +54,19 @@ def network(app):
         col_w.pack_start(ui.label("No Wi-Fi adapter found", "faint small"), False, False, 0)
     wifi.pack_start(col_w, True, True, 0)
     sw = Gtk.Switch(active=present and sysinfo.wifi_enabled(), valign=Gtk.Align.CENTER)
-    if present:
-        sw.connect("notify::active", lambda s, *_: sysinfo.wifi_set(s.get_active()))
-    else:
+    if not present:
         sw.set_sensitive(False)
         wifi.set_opacity(0.5)
     wifi.pack_start(sw, False, False, 0)
     card.pack_start(Gtk.Separator(), False, False, 0)
     card.pack_start(wifi, False, False, 0)
+    # Nearby networks, to join right here (filled in the background)
+    nets = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+    card.pack_start(nets, False, False, 0)
+    if present and sysinfo.wifi_enabled():
+        nets.pack_start(ui.label("Looking for networks…", "faint small"), False, False, 0)
+        sysinfo.in_background(lambda: (sysinfo.wifi_list(), sysinfo.wifi_current()),
+                              lambda res: _fill_networks(app, nets, *res))
 
     # VPN: which tunnel is up (filled in the background); opens Settings > VPN
     card.pack_start(Gtk.Separator(), False, False, 0)
@@ -91,8 +96,70 @@ def network(app):
             ctx.add_class("muted")
     sysinfo.in_background(sysinfo.vpn_list, fill)
 
-    card.pack_start(_link("Network settings", lambda: app.open_settings("network")), False, False, 0)
+    card.pack_start(_link("Network settings", lambda: _admin(app, lambda: app.open_settings("network"))),
+                    False, False, 0)
+    if present:
+        def wifi_toggled(s, *_):
+            on = s.get_active()
+            if _needs_admin(app):
+                s.handler_block_by_func(wifi_toggled)
+                s.set_active(not on)             # undone until the admin password is entered
+                s.handler_unblock_by_func(wifi_toggled)
+                _admin(app, lambda: sysinfo.wifi_set(on))
+            else:
+                sysinfo.wifi_set(on)
+                GLib.timeout_add(1500, lambda: (app.flyout_name == "network" and app.toggle_flyout("network", reopen=True),
+                                                False)[1])
+        sw.connect("notify::active", wifi_toggled)
     return card, _bottom(3)
+
+
+# -- Wi-Fi from the flyout -----------------------------------------------------------------
+def _needs_admin(app):
+    """Changing the device's network from the kiosk is for admins (when a password is set)."""
+    return app.kiosk is not None and app.cfg.lock_needs_password()
+
+
+def _admin(app, action):
+    if _needs_admin(app):
+        app.close_flyout()
+        app.kiosk.ask_admin(action)
+    else:
+        action()
+
+
+def _fill_networks(app, box, found, current):
+    if box.get_ancestor(Gtk.Window) is None:          # flyout closed meanwhile
+        return
+    for c in box.get_children():
+        box.remove(c)
+    if not found:
+        box.pack_start(ui.label("No networks found", "faint small"), False, False, 0)
+    for n in found:
+        n["active"] = n.get("active") or n["ssid"] == current
+    found = sorted(found, key=lambda n: not n["active"])      # the connected network first
+    saved = sysinfo.wifi_saved()
+    group = wifi.Group()
+    refresh = lambda: app.flyout_name == "network" and app.toggle_flyout("network", reopen=True)  # noqa: E731
+    # In the kiosk (with an admin password) joining goes through Settings
+    admin = (lambda: _admin(app, lambda: app.open_settings("network"))) if _needs_admin(app) else None
+    for n in found[:6]:
+        if n["active"]:
+            box.pack_start(_connected_row(n), False, False, 0)
+        else:
+            box.pack_start(wifi.NetworkRow(n, group, refresh, saved=n["ssid"] in saved, on_click=admin),
+                           False, False, 0)
+    box.show_all()
+
+
+def _connected_row(n):
+    row = ui.add_class(Gtk.Box(spacing=10), "flyout-static-row")
+    row.pack_start(ui.icon(wifi.signal_icon(n["signal"]), 16, "#3F434B"), False, False, 0)
+    name = ui.label(n["ssid"], "body")
+    name.set_ellipsize(3)
+    row.pack_start(name, True, True, 0)
+    row.pack_start(ui.label("Connected", "ok small"), False, False, 0)
+    return row
 
 
 def volume(app):

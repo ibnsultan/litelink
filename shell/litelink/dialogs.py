@@ -1,9 +1,11 @@
 """The connection dialog and the Settings window."""
 import copy
+import os
+import shutil
 
 from gi.repository import Gdk, GLib, Gtk
 
-from . import system, ui
+from . import system, ui, wifi
 from .config import DEFAULT_CONNECTION, has_credentials, normalize
 
 SETTINGS_GROUPS = [
@@ -620,16 +622,17 @@ class SettingsWindow(Gtk.Box):
             title = "Ethernet" if len(wired) == 1 else f"Ethernet {i + 1}"
             card, body = self._acc_card("ethernet", title, status, "ok small" if up else "muted small",
                                         open_=(i == 0))
-            con = a["connection"]
-            self._acc_row(body, "802.1X authentication", "Off", "Edit", enabled=False)
-            self._acc_row(body, "IP assignment", "Automatic (DHCP)" if a["method"] == "auto" else "Manual",
-                          "Edit", lambda a=a: self._edit_ip(a), enabled=bool(con))
-            self._acc_row(body, "DNS server assignment", "Manual" if a["dns_manual"] else "Automatic (DHCP)",
-                          "Edit", lambda a=a: self._edit_dns(a), enabled=bool(con))
+            if a["connection"]:
+                d = system.dot1x_get(a["connection"])
+                eap = {"peap": "PEAP", "ttls": "TTLS", "tls": "TLS (certificate)"}.get(d["eap"], "")
+                val = f"{eap} · {d['identity']}" if eap and d["identity"] else (eap or "Off")
+            else:
+                d, val = None, "Off"
+            self._acc_row(body, "802.1X authentication", val, "Edit",
+                          lambda a=a, d=d: self._edit_dot1x(a, d), enabled=bool(a["connection"]))
             if up:
                 gw = f" · gateway {a['gateway']}" if a["gateway"] else ""
                 self._acc_row(body, "IPv4 address", (a["address"] or "—") + gw)
-                self._acc_row(body, "DNS servers", ", ".join(a["dns"]) or "—")
             hw = ui.add_class(Gtk.Box(spacing=12), "acc-row")
             grid = Gtk.Grid(column_spacing=12, row_spacing=8)
             rows = [("Manufacturer", a["vendor"] or "Unknown"), ("Description", a["product"] or a["device"]),
@@ -661,6 +664,7 @@ class SettingsWindow(Gtk.Box):
             extra.pack_start(sw, False, False, 0)
             page.pack_start(self._acc_card("network", "Wi-Fi", "No Wi-Fi adapter found", "muted small",
                                            expandable=False, extra=extra)[0], False, False, 0)
+            self._net_general(page, adapters)
             return
         on = system.wifi_enabled()
         sw = Gtk.Switch(active=on, valign=Gtk.Align.CENTER)
@@ -680,13 +684,20 @@ class SettingsWindow(Gtk.Box):
                 found = system.wifi_list()
                 if not found:
                     self._acc_row(body, "No networks found", "")
-                for n in found[:8]:
-                    row = ui.add_class(Gtk.Box(spacing=12), "acc-row")
-                    lvl = "wifi3" if n["signal"] > 66 else "wifi2" if n["signal"] > 33 else "wifi1"
-                    row.pack_start(ui.icon(lvl, 18, "#16171A"), False, False, 0)
-                    row.pack_start(ui.label(n["ssid"], "body"), True, True, 0)
-                    row.pack_start(ui.label(n["security"], "faint small"), False, False, 0)
-                    row.pack_start(ui.button("Connect", "btn", lambda s=n["ssid"]: self._wifi_join(s)), False, False, 0)
+                saved = system.wifi_saved()
+                group = wifi.Group()
+                for n in found[:8]:             # the connected network comes first
+                    if n["active"]:
+                        row = ui.add_class(Gtk.Box(spacing=10), "acc-row")
+                        row.pack_start(ui.icon(wifi.signal_icon(n["signal"]), 16, "#16171A"), False, False, 0)
+                        row.pack_start(ui.label(n["ssid"], "body"), True, True, 0)
+                        row.pack_start(ui.label("Connected", "ok small"), False, False, 0)
+                    else:
+                        # Opens in place: password, Connect automatically, progress
+                        row = ui.add_class(wifi.NetworkRow(n, group, lambda: self.show("network"),
+                                                           saved=n["ssid"] in saved, icon_color="#16171A",
+                                                           form_width=320),
+                                           "acc-row")
                     body.pack_start(row, False, False, 0)
             body.show_all()
             return False
@@ -696,6 +707,38 @@ class SettingsWindow(Gtk.Box):
             GLib.timeout_add(1500, fill)
         sw.connect("notify::active", toggled)
         GLib.idle_add(fill)
+        self._net_general(page, adapters)
+
+    def _net_general(self, page, adapters):
+        """IP and DNS: settings of the device's network as a whole, not of one
+        adapter. IP assignment belongs to the connection in use; DNS servers
+        apply to every adapter and network."""
+        inuse = next((a for a in adapters if a["state"] == "connected" and a["connection"]), None)
+        any_profile = inuse or next((a for a in adapters if a["connection"]), None)
+        head = ui.label("IP & DNS", "group-title")
+        head.set_margin_top(6)
+        page.pack_start(head, False, False, 0)
+        g = self._list_group(page)
+        if inuse:
+            where = "Ethernet" if inuse["type"] == "ethernet" else inuse["connection"]
+            ip_sub = f"For the connection in use ({where})"
+            ip_val = "Automatic (DHCP)" if inuse["method"] == "auto" else "Manual"
+            if inuse["address"]:
+                ip_val += f" · {inuse['address']}"
+        else:
+            ip_sub, ip_val = "Connect to a network first", "—"
+        self._list_row(g, "IP assignment", ip_sub, self._value(ip_val),
+                       on_click=(lambda: self._edit_ip(inuse)) if inuse else None, enabled=bool(inuse))
+        dns_manual = bool(any_profile and any_profile["dns_manual"])
+        if dns_manual:
+            dns_val = ", ".join(any_profile["dns"]) or "Manual"
+        elif inuse and inuse["dns"]:
+            dns_val = "Automatic · " + ", ".join(inuse["dns"])
+        else:
+            dns_val = "Automatic (DHCP)"
+        self._list_row(g, "DNS servers", "Used by every adapter and network", self._value(dns_val),
+                       on_click=(lambda: self._edit_dns(any_profile)) if any_profile else None,
+                       enabled=bool(any_profile))
 
     # -- Time & region --------------------------------------------------------
     def _list_group(self, page):
@@ -1008,7 +1051,7 @@ class SettingsWindow(Gtk.Box):
             if mode.get_active_id() == "auto":
                 lst = []
             status.set_text("Applying…")
-            if system.set_dns(a["connection"], lst):
+            if system.set_dns_all(lst):
                 self.app.pop_layer()
                 self.show("network")
             else:
@@ -1016,32 +1059,167 @@ class SettingsWindow(Gtk.Box):
         self._dialog_buttons(dlg, save)
         self.app.push_layer(outer, "light")
 
+    def _edit_dot1x(self, a, cur):
+        """802.1X on a wired network: user name + password (PEAP / TTLS) or a
+        certificate (TLS). Certificates come from a USB drive."""
+        cur = cur or {}
+        outer, dlg = self._small_dialog("802.1X authentication")
+        outer.set_size_request(500, -1)
+        method = combo([("", "Off"), ("peap", "PEAP (user name and password)"),
+                        ("ttls", "TTLS (user name and password)"), ("tls", "TLS (certificate)")],
+                       cur.get("eap", ""))
+        dlg.pack_start(field("Authentication", method), False, False, 0)
+        ident = entry(cur.get("identity", ""), "Your network user name")
+        pw = entry("", "Unchanged" if cur.get("eap") in ("peap", "ttls") else "", secret=True)
+        anon = entry(cur.get("anonymous", ""), "anonymous")
+        files = {k: cur.get(k, "") for k in ("ca_cert", "client_cert", "private_key")}
+        key_pw = entry("", "", secret=True)
+
+        def file_field(key, title, optional_text):
+            box = Gtk.Box(spacing=10)
+            name = ui.label("", "muted body")
+            name.set_ellipsize(3)
+            box.pack_start(name, True, True, 0)
+
+            def chosen(path):
+                files[key] = path
+                show_name()
+            box.pack_start(ui.button("Choose…", "btn", lambda: self._pick_cert(chosen)), False, False, 0)
+            clear = ui.button("Remove", "btn", lambda: chosen(""))
+            clear.set_no_show_all(True)         # only once a file is chosen
+            clear.get_child().show_all()
+            box.pack_start(clear, False, False, 0)
+
+            def show_name():
+                name.set_text(os.path.basename(files[key]) if files[key] else optional_text)
+                clear.set_visible(bool(files[key]))
+            show_name()
+            return field(title, box)
+
+        pw_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        pw_box.pack_start(field("Password", pw), False, False, 0)
+        pw_box.pack_start(field("Anonymous identity", anon, optional=True), False, False, 0)
+        tls_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        tls_box.pack_start(file_field("client_cert", "User certificate", "None chosen"), False, False, 0)
+        tls_box.pack_start(file_field("private_key", "Private key", "None chosen"), False, False, 0)
+        tls_box.pack_start(field("Private key password", key_pw, optional=True), False, False, 0)
+        common = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        common.pack_start(field("Identity", ident), False, False, 0)
+        common.pack_start(pw_box, False, False, 0)
+        common.pack_start(tls_box, False, False, 0)
+        common.pack_start(file_field("ca_cert", "CA certificate", "None: the server isn’t checked"),
+                          False, False, 0)
+        dlg.pack_start(common, False, False, 0)
+        status = ui.label("", "small")
+        dlg.pack_start(status, False, False, 0)
+
+        def sync(*_):
+            m = method.get_active_id()
+            common.set_visible(bool(m))
+            pw_box.set_visible(m in ("peap", "ttls"))
+            tls_box.set_visible(m == "tls")
+        for w in (common, pw_box, tls_box):
+            w.set_no_show_all(True)
+            for ch in w.get_children():
+                ch.show_all()
+        method.connect("changed", sync)
+        sync()
+
+        def err(text):
+            status.set_markup(f'<span foreground="#C53030">{GLib.markup_escape_text(text)}</span>')
+
+        def save():
+            m = method.get_active_id()
+            if m and not ident.get_text().strip():
+                return err("Enter the identity (your network user name).")
+            if m in ("peap", "ttls") and not pw.get_text() and cur.get("eap") not in ("peap", "ttls"):
+                return err("Enter the password.")
+            if m == "tls" and not (files["client_cert"] and files["private_key"]):
+                return err("Choose the user certificate and the private key.")
+            s = {"eap": m, "identity": ident.get_text().strip(), "anonymous": anon.get_text().strip(),
+                 "password": pw.get_text(), "key_password": key_pw.get_text(), **files}
+            if m in ("peap", "ttls") and not s["password"]:
+                s.pop("password")                       # keep the saved one
+            status.set_text("Applying… (the network reconnects)")
+            dlg.set_sensitive(False)
+
+            def done(ok):
+                dlg.set_sensitive(True)
+                if ok:
+                    self.app.pop_layer()
+                    self.show("network")
+                else:
+                    err("Couldn’t connect with these settings. Check them and try again.")
+            system.in_background(lambda: system.dot1x_set(a["connection"], s), done)
+        self._dialog_buttons(dlg, save)
+        self.app.push_layer(outer, "light")
+
+    def _pick_cert(self, on_pick):
+        """Certificate and key files from a USB drive, copied into LiteLink's
+        settings (kept across reboots) so the drive can be removed afterwards."""
+        outer, dlg = self._small_dialog("Choose a file from a USB drive")
+        outer.set_size_request(480, -1)
+        msg = ui.label("Looking for USB drives…", "muted body", wrap=True)
+        dlg.pack_start(msg, False, False, 0)
+        lst = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        dlg.pack_start(lst, False, False, 0)
+        row = Gtk.Box(halign=Gtk.Align.END)
+        row.pack_start(ui.button("Cancel", "btn", self.app.pop_layer), False, False, 0)
+        dlg.pack_start(row, False, False, 0)
+        self.app.push_layer(outer, "light")
+        suffixes = (".pem", ".crt", ".cer", ".der", ".key", ".p12", ".pfx")
+
+        def work():
+            found = []
+            for d in system.media_list():
+                mp = system.media_mount(d["path"])
+                if mp:
+                    found += [(p, f"{d['label'] or d['drive']} · {where}")
+                              for p, where in system.find_files(mp, suffixes)]
+            return found
+
+        def pick(path):
+            dest_dir = os.path.expanduser("~/.config/litelink/certs")
+            os.makedirs(dest_dir, mode=0o700, exist_ok=True)
+            dest = os.path.join(dest_dir, os.path.basename(path))
+            try:
+                shutil.copyfile(path, dest)
+                os.chmod(dest, 0o600)
+            except OSError as e:
+                msg.set_markup(f'<span foreground="#C53030">Couldn’t copy the file: '
+                               f'{GLib.markup_escape_text(e.strerror or str(e))}</span>')
+                return
+            self.app.pop_layer()
+            on_pick(dest)
+
+        def listed(found):
+            if lst.get_ancestor(Gtk.Window) is None:
+                return
+            if not found:
+                msg.set_text("No certificate files found. Plug in a USB drive with a .pem, .crt, .cer, "
+                             ".der, .key, .p12 or .pfx file.")
+                return
+            msg.set_text("Certificate and key files on your USB drives:")
+            for i, (path, where) in enumerate(found):
+                r = ui.add_class(Gtk.Box(spacing=12), "device-row")
+                if i < len(found) - 1:
+                    ui.add_class(r, "device-row-sep")
+                col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+                col.pack_start(ui.label(os.path.basename(path), "body"), False, False, 0)
+                col.pack_start(ui.label(where, "faint small"), False, False, 0)
+                r.pack_start(col, True, True, 0)
+                b = ui.button("Use", "btn", lambda p=path: pick(p))
+                b.set_valign(Gtk.Align.CENTER)
+                r.pack_start(b, False, False, 0)
+                lst.pack_start(r, False, False, 0)
+            lst.show_all()
+        system.in_background(work, listed)
+
     def _dialog_buttons(self, dlg, on_save):
         row = Gtk.Box(spacing=10, halign=Gtk.Align.END)
         row.pack_start(ui.button("Cancel", "btn", self.app.pop_layer), False, False, 0)
         row.pack_start(ui.button("Save", "btn btn-primary", on_save), False, False, 0)
         dlg.pack_start(row, False, False, 0)
-
-    def _wifi_join(self, ssid):
-        outer, dlg = self._small_dialog(f"Join {ssid}")
-        pw = entry("", "Password (leave empty for open networks)", secret=True)
-        dlg.pack_start(pw, False, False, 0)
-        status = ui.label("", "small")
-        dlg.pack_start(status, False, False, 0)
-        row = Gtk.Box(spacing=10, halign=Gtk.Align.END)
-
-        def join():
-            status.set_text("Connecting…")
-            ok = system.wifi_connect(ssid, pw.get_text())
-            if ok:
-                self.app.pop_layer()
-                self.show("network")
-            else:
-                status.set_markup('<span foreground="#C53030">Couldn’t join. Check the password.</span>')
-        row.pack_start(ui.button("Cancel", "btn", self.app.pop_layer), False, False, 0)
-        row.pack_start(ui.button("Join", "btn btn-primary", join), False, False, 0)
-        dlg.pack_start(row, False, False, 0)
-        self.app.push_layer(outer, "light")
 
     def _panel_storage(self, page):
         from . import storage

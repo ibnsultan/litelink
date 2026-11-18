@@ -76,6 +76,7 @@ tooltip label { color: #FFFFFF; font-size: 12px; }
 .link-btn { border: none; background: transparent; box-shadow: none; padding: 0; }
 .link-btn label { color: #2F6FD6; font-size: 13px; font-weight: 500; }
 .ok { color: #1F7A4D; }
+.err { color: #C53030; }
 .muted { color: #5A606B; }
 .faint { color: #8A8F98; }
 .h1 { font-size: 22px; font-weight: 600; }
@@ -305,6 +306,12 @@ textview.log-view, textview.log-view text { background-color: #F6F7F9; color: #3
 /* A whole row in a dock menu that opens something (e.g. Network > VPN) */
 .flyout-row { border: none; background: transparent; box-shadow: none; padding: 4px 6px; margin: 0 -6px; border-radius: 8px; }
 .flyout-row:hover { background-color: #F2F5FA; }
+.flyout-static-row { padding: 4px 0; }
+/* Wi-Fi network opened to join (password, Connect automatically, progress) */
+.wifi-item.open { background-color: #F2F5FA; border-radius: 10px; margin: 0 -8px; padding: 2px 8px; }
+.wifi-item.open .flyout-row:hover { background-color: #E8ECF2; }
+.acc-row.wifi-item { padding-top: 8px; padding-bottom: 8px; }
+.acc-row.wifi-item.open { margin: 0; border-radius: 0; padding: 8px 16px 8px 70px; }
 /* Empty state (native status page) */
 .empty-title { font-size: 16px; font-weight: 600; color: #3A3F47; }
 /* VPN: Add tunnel (import from a USB drive) */

@@ -132,6 +132,31 @@ def set_dns(connection, servers):
     return ok and run(["nmcli", "connection", "up", connection], timeout=20, sudo=True)[0] == 0
 
 
+def network_profiles():
+    """-> [(name, active)] for every saved Ethernet and Wi-Fi connection."""
+    rc, out = run(["nmcli", "-t", "-f", "NAME,TYPE,ACTIVE", "connection", "show"])
+    result = []
+    for line in out.splitlines():
+        parts = line.replace("\\:", "\0").split(":")
+        if len(parts) == 3 and parts[1] in ("802-3-ethernet", "802-11-wireless"):
+            result.append((parts[0].replace("\0", ":"), parts[2] == "yes"))
+    return result
+
+
+def set_dns_all(servers):
+    """DNS for the whole device: every saved Ethernet and Wi-Fi connection,
+    so it stays the same whichever adapter or network is in use."""
+    ok = True
+    for name, active in network_profiles():
+        if active:
+            ok = set_dns(name, servers) and ok
+        else:
+            args = (["ipv4.dns", " ".join(servers), "ipv4.ignore-auto-dns", "yes"] if servers
+                    else ["ipv4.dns", "", "ipv4.ignore-auto-dns", "no"])
+            ok = run(["nmcli", "connection", "modify", name, *args], sudo=True)[0] == 0 and ok
+    return ok
+
+
 def wifi_present():
     return any(a["type"] == "wifi" for a in adapters())
 
@@ -146,22 +171,83 @@ def wifi_set(on):
 
 
 def wifi_list():
-    rc, out = run(["nmcli", "-t", "-f", "SSID,SIGNAL,SECURITY", "device", "wifi", "list"], timeout=10)
-    nets, seen = [], set()
+    """Nearby networks, the connected one first (it has 'active': True)."""
+    rc, out = run(["nmcli", "-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "device", "wifi", "list"], timeout=10)
+    nets = {}
     for line in out.splitlines():
-        parts = line.rsplit(":", 2)
-        if len(parts) != 3 or not parts[0] or parts[0] in seen:
+        in_use, _, rest = line.partition(":")
+        parts = rest.rsplit(":", 2)
+        if len(parts) != 3 or not parts[0]:
             continue
-        seen.add(parts[0])
-        nets.append({"ssid": parts[0], "signal": int(parts[1] or 0), "security": parts[2] or "Open"})
-    return nets
+        ssid = parts[0].replace("\\:", ":")
+        n = {"ssid": ssid, "signal": int(parts[1] or 0), "security": parts[2] or "Open",
+             "active": in_use.strip() == "*"}
+        old = nets.get(ssid)          # one row per name, even with several access points
+        if old is None:
+            nets[ssid] = n
+        else:
+            old["active"] = old["active"] or n["active"]
+            old["signal"] = max(old["signal"], n["signal"])
+    return sorted(nets.values(), key=lambda n: (not n["active"], -n["signal"]))
 
 
-def wifi_connect(ssid, password):
-    cmd = ["nmcli", "device", "wifi", "connect", ssid]
+def wifi_current():
+    """The Wi-Fi network this device is connected to ('' if none), even when
+    Ethernet is the primary connection."""
+    rc, out = run(["nmcli", "-t", "-f", "ACTIVE,SSID", "device", "wifi"], timeout=10)
+    for line in out.splitlines():
+        if line.startswith("yes:"):
+            return line[4:]
+    return ""
+
+
+def wifi_connect(ssid, password="", auto=True):
+    """Join a network (a saved one uses its stored password when none is given).
+    auto: connect to it by itself from now on. -> (ok, reason), reason one of
+    '' | 'password' | 'notfound' | 'timeout' | 'failed'."""
+    cmd = ["sudo", "-n", "nmcli", "--wait", "30", "device", "wifi", "connect", ssid]
     if password:
         cmd += ["password", password]
-    return run(cmd, timeout=30, sudo=True)[0] == 0
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
+    except subprocess.TimeoutExpired:
+        return False, "timeout"
+    except OSError:
+        return False, "failed"
+    if p.returncode != 0:
+        err = (p.stderr + p.stdout).lower()
+        if "secrets were required" in err or "psk" in err or "password" in err or "802-1x" in err:
+            return False, "password"
+        if "no network with ssid" in err:
+            return False, "notfound"
+        if "timeout" in err or "timed out" in err:
+            return False, "timeout"
+        return False, "failed"
+    rc, out = run(["nmcli", "-t", "-f", "UUID,TYPE", "connection", "show", "--active"])
+    for line in out.splitlines():
+        uuid, _, typ = line.partition(":")
+        if typ == "802-11-wireless":
+            run(["nmcli", "connection", "modify", uuid, "connection.autoconnect", "yes" if auto else "no"],
+                sudo=True)
+            break
+    return True, ""
+
+
+def wifi_state():
+    """The Wi-Fi adapter's NetworkManager state, e.g. 'connecting (need authentication)'."""
+    rc, out = run(["nmcli", "-t", "-f", "TYPE,STATE", "device"])
+    for line in out.splitlines():
+        typ, _, state = line.partition(":")
+        if typ == "wifi":
+            return state
+    return ""
+
+
+def wifi_saved():
+    """Names of the saved Wi-Fi connections (NetworkManager names them after the network)."""
+    rc, out = run(["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show"])
+    return {line.rpartition(":")[0].replace("\\:", ":") for line in out.splitlines()
+            if line.endswith(":802-11-wireless")}
 
 
 # ---------------------------------------------------------------- time & region
@@ -655,6 +741,41 @@ def sink_name():
     rc, out = run(["wpctl", "inspect", "@DEFAULT_AUDIO_SINK@"])
     m = re.search(r'node\.description = "([^"]+)"', out)
     return m.group(1) if m else "Default output"
+
+
+# ---------------------------------------------------------------- 802.1X (wired)
+def dot1x_get(connection):
+    """-> dict(eap, identity, anonymous, ca_cert, client_cert, private_key) ('' = off)."""
+    rc, out = run(["nmcli", "-g", "802-1x.eap,802-1x.identity,802-1x.anonymous-identity,802-1x.ca-cert,"
+                   "802-1x.client-cert,802-1x.private-key", "connection", "show", connection])
+    vals = (out.splitlines() + [""] * 6)[:6]
+    keys = ("eap", "identity", "anonymous", "ca_cert", "client_cert", "private_key")
+    d = {k: v.replace("\\:", ":").strip() for k, v in zip(keys, vals)}
+    for k in ("ca_cert", "client_cert", "private_key"):
+        d[k] = d[k].replace("file://", "")
+    d["eap"] = d["eap"].split(",")[0]
+    return d
+
+
+def dot1x_set(connection, s):
+    """s: dict(eap: ''|peap|ttls|tls, identity, password, anonymous, ca_cert,
+    client_cert, private_key, key_password). '' turns 802.1X off. -> ok"""
+    if not s.get("eap"):
+        cmd = ["nmcli", "connection", "modify", connection, "remove", "802-1x"]
+        ok = run(cmd, sudo=True)[0] == 0
+    else:
+        args = ["802-1x.eap", s["eap"], "802-1x.identity", s.get("identity", ""),
+                "802-1x.anonymous-identity", s.get("anonymous", ""),
+                "802-1x.ca-cert", s.get("ca_cert", "")]
+        if s["eap"] == "tls":
+            args += ["802-1x.client-cert", s.get("client_cert", ""), "802-1x.private-key", s.get("private_key", ""),
+                     "802-1x.private-key-password", s.get("key_password", ""), "802-1x.phase2-auth", ""]
+        else:
+            args += ["802-1x.phase2-auth", "mschapv2", "802-1x.client-cert", "", "802-1x.private-key", ""]
+            if "password" in s:               # absent: keep the saved password
+                args += ["802-1x.password", s["password"]]
+        ok = run(["nmcli", "connection", "modify", connection, *args], sudo=True)[0] == 0
+    return ok and run(["nmcli", "connection", "up", connection], timeout=30, sudo=True)[0] == 0
 
 
 # ---------------------------------------------------------------- display
