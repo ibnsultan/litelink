@@ -23,6 +23,9 @@ shell:
 	mkdir -p $(SHELL_DST)
 	cp -r shell/main.py shell/theme.css shell/litelink $(SHELL_DST)/
 	find $(SHELL_DST) -name __pycache__ -prune -exec rm -rf {} +
+	# Builds run as root; keep the folder owned like the rest of the checkout so
+	# syncing the repo as a normal user (tools/vm-build.ps1) can update it
+	chown -R --reference=$(BUILD)/config $(dir $(SHELL_DST))
 
 iso: branding shell
 	chmod +x $(BUILD)/auto/* $(BUILD)/config/hooks/normal/*.hook.chroot $(BUILD)/config/hooks/normal/*.hook.binary \
