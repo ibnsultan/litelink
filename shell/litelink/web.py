@@ -23,6 +23,7 @@ import shutil
 import signal
 import ssl
 import subprocess
+import sys
 import tempfile
 import threading
 import urllib.error
@@ -171,8 +172,11 @@ class Session:
         bg = os.path.join(dst, "background.js")
         with open(bg) as f:
             src = f.read()
-        src = src.replace("const DEFAULT_HOSTS = ['liteos.test'];",
-                          "const DEFAULT_HOSTS = " + json.dumps([hostname(self.url)]) + ";")
+        # The helper's host list (whatever it holds) becomes this connection's LiteOS host
+        src, n = re.subn(r"const DEFAULT_HOSTS = \[[^\]]*\];",
+                         "const DEFAULT_HOSTS = " + json.dumps([hostname(self.url)]) + ";", src, count=1)
+        if not n:
+            print("web: frame helper has no DEFAULT_HOSTS line; LiteOS host not set", file=sys.stderr)
         with open(bg, "w") as f:
             f.write(src)
         return dst
