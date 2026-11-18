@@ -1,0 +1,77 @@
+#!/usr/bin/python3
+"""LiteLink OS: browser permissions for a LiteOS session (run as root via sudo by the shell).
+
+  litelink-web grant ORIGIN    let ORIGIN (a LiteOS instance) use what the web
+                               platform otherwise asks for, without prompts
+  litelink-web clear           remove those grants
+
+Chromium runs in kiosk mode, where permission prompts can't be answered (they
+hang off the address bar, which kiosk mode doesn't have), so a LiteOS app asking
+to read the clipboard (Docs, Sheets: Ctrl+V), notify or use the camera is simply
+refused. The shell calls `grant` with the LiteOS address right before starting
+Chromium, only when the address identified itself as LiteOS
+(<meta name="application-name" content="LiteOS">); ordinary sites get nothing.
+
+The grants are a Chromium managed-policy file, read when Chromium starts:
+/etc/chromium/policies/managed/litelink-liteos.json. The device-wide rules stay
+in litelink.json next to it.
+"""
+import json
+import os
+import re
+import sys
+
+POLICY = "/etc/chromium/policies/managed/litelink-liteos.json"
+# scheme://host[:port], host = DNS name or IPv4 (what LiteLink connects LiteOS by)
+ORIGIN = re.compile(r"^(https?)://([a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*"
+                    r"|\d{1,3}(\.\d{1,3}){3})(:\d{1,5})?$")
+
+# Per-site "allow" policies: the LiteOS origin is added to each list
+ALLOW_LISTS = [
+    "ClipboardAllowedForUrls",          # read the clipboard (paste in Docs, Sheets, Slides…)
+    "NotificationsAllowedForUrls",      # LiteOS notifications
+    "AudioCaptureAllowedUrls",          # microphone
+    "VideoCaptureAllowedUrls",          # camera
+    "AutoplayAllowlist",                # media plays without a click first
+    "PopupsAllowedForUrls",             # windows opened by LiteOS apps
+    "CookiesAllowedForUrls",            # incl. third-party cookies inside LiteOS (sign-ins in framed sites)
+    "WindowManagementAllowedForUrls",   # multi-screen window placement
+    "LocalFontsAllowedForUrls",         # the device's fonts (Docs font list)
+    "IdleDetectionAllowedForUrls",      # "away" detection
+    "SensorsAllowedForUrls",            # motion sensors
+    "SerialAllowAllPortsForUrls",       # serial devices (scales, card readers)
+    "WebHidAllowAllDevicesForUrls",     # HID devices (signature pads, barcode readers)
+]
+
+
+def grant(origin):
+    origin = origin.strip().rstrip("/").lower()
+    if not ORIGIN.match(origin):
+        raise SystemExit(f"not an origin: {origin!r} (scheme://host[:port])")
+    policy = {name: [origin] for name in ALLOW_LISTS}
+    os.makedirs(os.path.dirname(POLICY), exist_ok=True)
+    tmp = POLICY + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(policy, f, indent=1)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, POLICY)
+
+
+def clear():
+    try:
+        os.remove(POLICY)
+    except FileNotFoundError:
+        pass
+
+
+def main(argv):
+    if len(argv) == 3 and argv[1] == "grant":
+        grant(argv[2])
+    elif len(argv) == 2 and argv[1] == "clear":
+        clear()
+    else:
+        raise SystemExit(__doc__)
+
+
+if __name__ == "__main__":
+    main(sys.argv)

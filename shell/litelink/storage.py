@@ -182,8 +182,12 @@ PROTOCOLS = [
     ("rdp", "RDP", "Microsoft Remote Desktop", True),
     ("vnc", "VNC", "Screen sharing with any computer", False),
     ("workspaces", "Remote workspaces", "Citrix Workspace, VMware Horizon", False),
-    ("webkiosk", "Web kiosk", "Opens a website full screen. Adds a browser engine.", False),
+    ("webkiosk", "Web kiosk", "LiteOS or any website, full screen. Adds a browser engine (Chromium).", True),
 ]
+
+# Web kiosk needs about 2 GB of memory. A "2 GB" device reports a little less
+# (the kernel and graphics keep some), so warn below 1.75 GiB.
+WEB_MIN_KB = 1835008
 
 
 def _disk_name(d):
@@ -394,11 +398,28 @@ class Installer:
                 chk.set_sensitive(False)
                 self._row(protos, title, sub, chk, sep=not last)
             else:
-                def toggled(c, k=key):
+                warn = None
+                if key == "webkiosk":
+                    mem = system.memory_kb()
+                    if mem and mem < WEB_MIN_KB:
+                        warn = ui.label("", "small", wrap=True)
+                        warn.set_markup('<span foreground="#B26A00">This device has {:.1f} GB of memory. Web kiosk '
+                                        'needs about 2 GB: pages may be slow or close by themselves.</span>'
+                                        .format(mem / 1048576))
+                        warn.set_no_show_all(True)
+
+                def toggled(c, k=key, warn=warn):
                     (self.features.add if c.get_active() else self.features.discard)(k)
                     recount()
+                    if warn is not None:
+                        warn.set_visible(c.get_active())
                 chk.connect("toggled", toggled)
-                self._row(protos, title, sub, chk, sep=not last, enabled=available)
+                self._row(protos, title, sub, chk, sep=not last and warn is None, enabled=available)
+                if warn is not None:
+                    warn.set_margin_start(4)
+                    warn.set_margin_bottom(10)
+                    protos.pack_start(warn, False, False, 0)
+                    warn.set_visible(chk.get_active())
         recount()
         box.pack_start(protos, False, False, 0)
         self._buttons(ui.button("Back", "btn", self._step_time),

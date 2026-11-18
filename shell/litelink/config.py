@@ -29,6 +29,11 @@ DEFAULT_CONNECTION = {
     "ignore_cert": False,    # set when the user chose "remember this certificate"
     "display": {"resolution": "fullscreen", "depth": 32, "multimon": False, "dynamic": True},
     "devices": {"clipboard": True, "audio": True, "microphone": False, "usb": False, "smartcard": False},
+    # Web kiosk (Chromium): host is the address. A LiteOS instance is recognised by
+    # itself (its <meta name="application-name" content="LiteOS">), not set here.
+    "web": {"allowed": "",          # Web kiosk: other sites it may open (empty = any)
+            "idle_minutes": 0,      # clear the session and go home after this long unused (0 = never)
+            "keep_signins": False},  # keep cookies between sessions (off: a fresh profile each time)
 }
 
 WEB_PROTOCOLS = ("web",)

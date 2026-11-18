@@ -75,6 +75,16 @@ hsetroot
 # RDP client
 freerdp3-x11
 
+# Web sessions (LiteOS, Web kiosk): Chromium in kiosk mode, managed by policy
+# (/etc/chromium/policies/managed/litelink.json). Liberation fonts give web pages
+# metric-compatible Arial / Times / Courier.
+# TODO: move into its own image module, installed only when LiteOS / Web kiosk is ticked.
+chromium
+fonts-liberation
+# Compressed swap in RAM (zram, lz4, half of RAM by default): Chromium runs a
+# process per site, and 2 GB devices like the Wyse 3040 need the headroom
+zram-tools
+
 # Audio
 pipewire-pulse
 wireplumber

@@ -243,7 +243,8 @@ class Shell(Gtk.Window):
         img.set_hexpand(True)
         tile.pack_start(img, True, True, 0)
         ov.add(tile)
-        badge = ui.label(conn.get("protocol", "rdp").upper(), "proto-badge")
+        badge = ui.label({"web": "WEB"}.get(conn.get("protocol"), conn.get("protocol", "rdp").upper()),
+                         "proto-badge")
         badge.set_halign(Gtk.Align.END)
         badge.set_valign(Gtk.Align.END)
         ov.add_overlay(badge)
@@ -523,12 +524,44 @@ class Shell(Gtk.Window):
         layer = self.push_layer(screens.connecting(self, conn), "dark", closable=False)
 
         def launch():
+            if conn.get("protocol") in WEB_PROTOCOLS:
+                launch_web()
+                return
             try:
                 self.session = Session(conn, pw, lambda *a: self._session_ended(conn, layer, *a),
                                        username=username, domain=domain, ignore_cert=ignore_cert)
             except OSError as e:
                 self.pop_layer(layer)
                 self.push_layer(screens.error(self, conn, "unreachable", 255, str(e)), "dark")
+
+        def launch_web():
+            # Check the server answers first: Chromium would only show its own error page
+            from . import web
+            if not system.web_engine():
+                self.pop_layer(layer)
+                self.push_layer(screens.error(self, conn, "noengine", 0, ""), "dark", closable=self.kiosk is None)
+                return
+            wait = self._vpn_wait = {"layer": layer, "cancelled": False}
+
+            def started(res):
+                if wait["cancelled"] or self._vpn_wait is not wait:
+                    return
+                self._vpn_wait = None
+                if not res["ok"]:
+                    self.pop_layer(layer)
+                    self.push_layer(screens.error(self, conn, "unreachable", 0, res["detail"]),
+                                    "dark", closable=self.kiosk is None)
+                    return
+                try:
+                    self.session = web.Session(conn, lambda *a: self._session_ended(conn, layer, *a),
+                                               url=res["url"], liteos=res["liteos"])
+                except OSError as e:
+                    self.pop_layer(layer)
+                    self.push_layer(screens.error(self, conn, "unreachable", 255, str(e)), "dark")
+                    return
+                from .floatbar import FloatBar
+                self.floatbar = FloatBar(conn["name"], web.hostname(res["url"]) or res["url"], self.cancel_session)
+            system.in_background(lambda: web.probe(conn), started)
 
         if not conn.get("vpn"):
             launch()
@@ -573,6 +606,9 @@ class Shell(Gtk.Window):
         from . import screens
         cancelled = self.session is not None and self.session.cancelled
         self.session = None
+        if getattr(self, "floatbar", None) is not None:
+            self.floatbar.close()
+            self.floatbar = None
         self.pop_layer(layer)
         creds, self._creds = self._creds, {}
         if self.kiosk is not None:

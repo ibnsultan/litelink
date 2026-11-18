@@ -1,0 +1,22 @@
+{
+  "DeveloperToolsAvailability": 2,
+  "IncognitoModeAvailability": 1,
+  "BrowserSignin": 0,
+  "SyncDisabled": true,
+  "BrowserAddPersonEnabled": false,
+  "BrowserGuestModeEnabled": false,
+  "PasswordManagerEnabled": false,
+  "AutofillAddressEnabled": false,
+  "AutofillCreditCardEnabled": false,
+  "PrintingEnabled": false,
+  "DownloadRestrictions": 3,
+  "DefaultBrowserSettingEnabled": false,
+  "MetricsReportingEnabled": false,
+  "PromotionalTabsEnabled": false,
+  "TranslateEnabled": false,
+  "BackgroundModeEnabled": false,
+  "HardwareAccelerationModeEnabled": true,
+  "BlockThirdPartyCookies": false,
+  "URLBlocklist": ["chrome://*", "file://*", "view-source:*"],
+  "URLAllowlist": ["chrome://newtab", "chrome-extension://*"]
+}

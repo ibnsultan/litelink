@@ -277,6 +277,22 @@ radio:checked { background-color: #2F6FD6; border-color: #2F6FD6; color: #FFFFFF
 .kiosk-link { border: none; background: transparent; box-shadow: none; padding: 4px 8px; }
 .kiosk-link label { color: rgba(255, 255, 255, 0.85); font-size: 13px; }
 .kiosk-link:hover label { color: #FFFFFF; text-decoration: underline; }
+/* Web sessions: connection bar at the top edge (handle; opens on hover) */
+/* No compositor on thin clients: solid colours, square corners, the window is
+   exactly the handle or the bar */
+/* The window is cut to a rounded outline (X11 shape, no compositor needed); the
+   radii here match the cut in floatbar.py */
+window.floatbar-window { background-color: #FFFFFF; }
+.floatbar-tab { background: #FFFFFF; border: 1px solid #D5D9E0; border-top: none; border-radius: 0 0 7px 7px;
+                box-shadow: none; min-width: 40px; min-height: 13px; padding: 0 0 1px; outline-style: none; }
+.floatbar-tab:hover { background: #F4F5F7; }
+.floatbar-bar { background-color: #FFFFFF; border: 1px solid #D5D9E0; border-top: none;
+                border-radius: 0 0 7px 7px; padding: 2px 4px; min-height: 22px; }
+.floatbar-title { font-size: 12px; font-weight: 500; color: #16171A; }
+.floatbar-btn { background: transparent; border: none; box-shadow: none; border-radius: 5px;
+                min-width: 24px; min-height: 22px; padding: 0; outline-style: none; }
+.floatbar-btn:hover { background: #EEF0F3; }
+.floatbar-btn.active { background: #E7EFFB; }
 /* Install wizard (full screen, separate from Settings) */
 .wizard-scrim { background-color: rgba(14, 26, 52, 0.28); }
 .wizard-card { background-color: #FFFFFF; border-radius: 18px; box-shadow: 0 30px 80px rgba(10, 20, 40, 0.35); }

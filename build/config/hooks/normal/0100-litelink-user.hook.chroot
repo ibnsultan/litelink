@@ -23,10 +23,10 @@ cat > /etc/sudoers.d/litelink-shell <<'EOF'
 # nmcli gets Wi-Fi and 802.1X passwords as arguments: don't write its command
 # lines to the system log (sudo logs every command by default)
 Defaults!/usr/bin/nmcli !syslog
-litelink ALL=(root) NOPASSWD: /usr/bin/systemctl poweroff, /usr/bin/systemctl reboot, /usr/bin/nmcli, /usr/sbin/rfkill, /usr/bin/timedatectl, /usr/local/sbin/litelink-state, /usr/local/sbin/litelink-storage, /usr/local/sbin/litelink-media, /usr/local/sbin/litelink-vpn, /usr/bin/journalctl
+litelink ALL=(root) NOPASSWD: /usr/bin/systemctl poweroff, /usr/bin/systemctl reboot, /usr/bin/nmcli, /usr/sbin/rfkill, /usr/bin/timedatectl, /usr/local/sbin/litelink-state, /usr/local/sbin/litelink-storage, /usr/local/sbin/litelink-media, /usr/local/sbin/litelink-vpn, /usr/local/sbin/litelink-web, /usr/bin/journalctl
 EOF
 chmod 0755 /usr/local/sbin/litelink-state /usr/local/sbin/litelink-storage /usr/local/sbin/litelink-restore \
-    /usr/local/sbin/litelink-media /usr/local/sbin/litelink-vpn
+    /usr/local/sbin/litelink-media /usr/local/sbin/litelink-vpn /usr/local/sbin/litelink-web
 
 # Settings storage: folders restored from the litelink-data partition at boot
 # (see litelink-storage). They exist in the image so the bind mounts have

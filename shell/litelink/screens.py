@@ -196,7 +196,8 @@ def connecting(app, conn):
     anim.set_margin_bottom(18)
     col.pack_start(anim, False, False, 0)
     col.pack_start(_center(f"Connecting to {conn['name']}", "h1"), False, False, 0)
-    col.pack_start(_center(f"{conn['host']} · Remote Desktop", "sub"), False, False, 0)
+    kind = {"web": "Web kiosk"}.get(conn.get("protocol"), "Remote Desktop")
+    col.pack_start(_center(f"{conn['host']} · {kind}", "sub"), False, False, 0)
     cancel = ui.button("Cancel", "btn pill btn-ghost", app.cancel_session)
     cancel.set_halign(Gtk.Align.CENTER)
     cancel.set_margin_top(22)
@@ -208,6 +209,10 @@ ERRORS = {
     # Not an error: asked before connecting when no username or password is saved
     "signin": dict(title="Sign in to {name}", body="Enter your account for {host}.",
                    color="blue", icon="lock", fg="#FFFFFF"),
+    "noengine": dict(title="Web kiosk isn’t installed",
+                     body="This device was installed without the browser engine, so {name} can’t open. "
+                          "Reinstall from a LiteLink USB stick with Web kiosk ticked.",
+                     color="amber", icon="warn", fg="#2B1A00"),
     "unreachable": dict(title="Couldn’t connect to {name}",
                         body="{host} didn’t respond. Check that the computer is on and connected to the network, then try again.",
                         color="amber", icon="warn", fg="#2B1A00"),
@@ -297,6 +302,9 @@ def error(app, conn, kind, code, details, extra=None):
         else:
             buttons.pack_start(ui.button("Reconnect now", "btn pill btn-primary", reconnect), False, False, 0)
         buttons.pack_start(ui.button(back_label, "btn pill btn-ghost", back), False, False, 0)
+    elif kind == "noengine":
+        # Nothing to retry: only a reinstall with Web kiosk ticked helps
+        buttons.pack_start(ui.button(back_label, "btn pill btn-primary", back), False, False, 0)
     elif kiosk:
         # Unattended: try again by itself ("Try again | 30"), or go back to the kiosk screen
         retry = lambda: app.start_session(conn, **(extra or {}).get("creds", {}))
@@ -327,7 +335,12 @@ def error(app, conn, kind, code, details, extra=None):
         return col
 
     # Show details: the raw FreeRDP result, for IT
-    text = "WireGuard (NetworkManager)" if kind == "vpn" else f"xfreerdp3 exit code {code}"
+    if kind == "vpn":
+        text = "WireGuard (NetworkManager)"
+    elif conn.get("protocol") == "web":
+        text = f"Chromium exit code {code}" if code else "No answer from the server"
+    else:
+        text = f"xfreerdp3 exit code {code}"
     if details.strip():
         text += "\n" + "\n".join(details.strip().splitlines()[-6:])
     rev = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_DOWN)

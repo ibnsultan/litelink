@@ -284,28 +284,53 @@ class ConnectionDialog(Gtk.Box):
         # -- General
         g = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16, margin=20)
         proto = Gtk.Box(spacing=8)
-        rdp = ui.button("Remote Desktop (RDP)", "btn proto-on")
-        proto.pack_start(rdp, False, False, 0)
-        for name in ("VNC", "Web kiosk"):
-            b = ui.button(name, "btn proto-off")
-            b.set_sensitive(False)
-            b.set_tooltip_text("Not supported yet")
+        self.protocol = c.get("protocol") or "rdp"
+        self.proto_buttons = {}
+        # Protocols left out when installing aren't listed at all; ones still being
+        # built are listed greyed out
+        for key, name in (("rdp", "Remote Desktop (RDP)"), ("vnc", "VNC"),
+                          ("web", "Web kiosk")):
+            if key == "web" and not system.web_engine():
+                continue
+            b = ui.button(name, "btn", lambda k=key: self._set_protocol(k))
+            if key == "vnc":
+                ui.add_class(b, "proto-off")
+                b.set_sensitive(False)
+                b.set_tooltip_text("Not supported yet")
+            self.proto_buttons[key] = b
             proto.pack_start(b, False, False, 0)
         g.pack_start(field("Protocol", proto), False, False, 0)
 
         self.e_name = entry(c["name"] if not self.is_new else "", "e.g. Office Desktop")
         self.e_host = entry(c["host"], "Host name or IP address")
-        self.e_user = entry(c["username"], "e.g. jdoe")
+        self.f_host = field("Host or IP", self.e_host)
+        # Both optional: whichever is missing is asked for when connecting
+        self.e_user = entry(c["username"], "Ask when connecting")
         self.e_pass = entry(c["password"], "Ask when connecting", secret=True)
         self.e_domain = entry(c["domain"], "CORP")
         self.e_gw = entry(c["gateway"], "gateway.corp.com")
         grid = Gtk.Grid(column_spacing=16, row_spacing=14, column_homogeneous=True)
         grid.attach(field("Name", self.e_name), 0, 0, 2, 1)
-        grid.attach(field("Host or IP", self.e_host), 0, 1, 2, 1)
-        grid.attach(field("Username", self.e_user), 0, 2, 1, 1)
-        grid.attach(field("Password", self.e_pass), 1, 2, 1, 1)
-        grid.attach(field("Domain", self.e_domain, optional=True), 0, 3, 1, 1)
-        grid.attach(field("RD Gateway", self.e_gw, optional=True), 1, 3, 1, 1)
+        grid.attach(self.f_host, 0, 1, 2, 1)
+        # RDP only
+        self.rdp_fields = [field("Username", self.e_user, optional=True), field("Password", self.e_pass, optional=True),
+                           field("Domain", self.e_domain, optional=True), field("RD Gateway", self.e_gw, optional=True)]
+        for i, f in enumerate(self.rdp_fields):
+            grid.attach(f, i % 2, 2 + i // 2, 1, 1)
+        # Web kiosk only: other sites it may open, reset after a period of no use
+        w = c.get("web", {})
+        self.e_allowed = entry(w.get("allowed", ""), "e.g. docs.example.com, help.example.com")
+        self.f_allowed = field("Other allowed sites", self.e_allowed, optional=True)
+        self.f_allowed.pack_start(ui.label("Leave empty to allow any site", "muted small"), False, False, 0)
+        grid.attach(self.f_allowed, 0, 2, 2, 1)
+        # LiteOS and Web kiosk
+        self.cb_idle = combo([("0", "Never"), ("2", "After 2 minutes"), ("5", "After 5 minutes"),
+                              ("10", "After 10 minutes"), ("30", "After 30 minutes")],
+                             str(w.get("idle_minutes", 0)))
+        self.f_idle = field("Start over when unused", self.cb_idle)
+        self.f_idle.pack_start(ui.label("Signs out of everything and goes back to the start page", "muted small"),
+                               False, False, 0)
+        grid.attach(self.f_idle, 0, 3, 2, 1)
         # Private network: a WireGuard tunnel from Settings > VPN, brought up first
         tunnels = system.vpn_list()
         opts = [("", "None")] + [(t["uuid"], t["name"]) for t in tunnels]
@@ -320,9 +345,12 @@ class ConnectionDialog(Gtk.Box):
         g.pack_start(grid, False, False, 0)
         self.c_auto = Gtk.CheckButton(label="Connect automatically at startup", active=c["auto"])
         self.c_reconnect = Gtk.CheckButton(label="Reconnect when the session ends", active=c["reconnect"])
+        self.c_keep = Gtk.CheckButton(label="Keep sign-ins between sessions", active=bool(w.get("keep_signins")))
         g.pack_start(self.c_auto, False, False, 0)
         g.pack_start(self.c_reconnect, False, False, 0)
+        g.pack_start(self.c_keep, False, False, 0)
         stack.add_named(g, "general")
+        self.grid = grid
 
         # -- Display
         d = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16, margin=20)
@@ -358,6 +386,9 @@ class ConnectionDialog(Gtk.Box):
 
         self.pack_start(tabs, False, False, 0)
         self.pack_start(stack, True, True, 0)
+        self.tabs = tabs
+        self.show_all()
+        self._set_protocol(self.protocol)
 
         foot = ui.add_class(Gtk.Box(spacing=10), "dialog-footer")
         self.err = ui.label("", "small")
@@ -366,12 +397,39 @@ class ConnectionDialog(Gtk.Box):
         foot.pack_start(ui.button("Save", "btn btn-primary", self.save), False, False, 0)
         self.pack_start(foot, False, False, 0)
 
+    def _set_protocol(self, key):
+        """Show the fields that belong to the protocol (RDP / LiteOS / Web kiosk)."""
+        self.protocol = key
+        for k, b in self.proto_buttons.items():
+            ctx = b.get_style_context()
+            (ctx.add_class if k == key else ctx.remove_class)("proto-on")
+        web = key == "web"
+        label = self.f_host.get_children()[0].get_children()[0]
+        label.set_text("Address" if web else "Host or IP")
+        self.e_host.set_placeholder_text("e.g. liteos.local or https://portal.example.com" if web
+                                         else "Host name or IP address")
+        shown = [(f, not web) for f in self.rdp_fields] + [
+            (self.f_allowed, key == "web"), (self.f_idle, web), (self.c_keep, web), (self.c_reconnect, not web),
+            # Display and Devices are RDP settings
+            # (only General would be left, so the whole tab row goes)
+            (self.tabs, not web)]
+        for w, on in shown:
+            w.set_no_show_all(True)        # the layer's show_all() mustn't bring them back
+            w.set_visible(on)
+        if web:
+            self.tabs.select("general")
+
     def save(self):
         host = self.e_host.get_text().strip()
         if not host:
-            self.err.set_markup('<span foreground="#C53030">Enter a host name or IP address.</span>')
+            what = "the address to open" if self.protocol == "web" else "a host name or IP address"
+            self.err.set_markup(f'<span foreground="#C53030">Enter {what}.</span>')
             return
         c = self.conn
+        c["protocol"] = self.protocol
+        c["web"] = {"allowed": self.e_allowed.get_text().strip(),
+                    "idle_minutes": int(self.cb_idle.get_active_id() or 0),
+                    "keep_signins": self.c_keep.get_active()}
         c.update({
             "name": self.e_name.get_text().strip() or host,
             "host": host,

@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "LiteLink Kiosk",
+  "version": "1.0.0",
+  "description": "LiteLink web session rules: allowed sites and the reset after a period of no use.",
+  "permissions": ["declarativeNetRequest", "idle", "browsingData", "tabs"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "web_accessible_resources": [{ "resources": ["blocked.html"], "matches": ["<all_urls>"] }]
+}

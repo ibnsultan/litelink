@@ -1200,6 +1200,19 @@ def _read(path):
         return ""
 
 
+def web_engine():
+    """The browser engine (Chromium) is on this device. It's an image module
+    (web.squashfs): always on the USB stick, on an installed disk only when Web
+    kiosk was ticked in the installer."""
+    return os.path.exists("/usr/lib/chromium/chromium")
+
+
+def memory_kb():
+    """Total memory (kB) as the kernel reports it, or 0 if unknown."""
+    m = re.search(r"MemTotal:\s+(\d+)", _read("/proc/meminfo"))
+    return int(m.group(1)) if m else 0
+
+
 def about():
     osr = os_release()
     cpu = ""
