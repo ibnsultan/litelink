@@ -33,6 +33,7 @@ label { color: #16171A; }
 .desk-icon {
   border-radius: 10px; border: none; background: transparent; box-shadow: none;
   padding: 10px 6px 8px;
+  -gtk-icon-shadow: none;
 }
 .desk-icon:hover, .desk-icon:focus { background-color: rgba(255, 255, 255, 0.18); }
 .desk-icon label.name { color: #FFFFFF; font-size: 13px; font-weight: 500; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5); }
