@@ -8,7 +8,7 @@ command-line knowledge.
 
 Litelink 2 (code named **Siamese**) is in active development. It is a rewrite on
 Debian 13 and replaces the original Ubuntu 18.04 image. alot of things are unfinished; please
-[report issues](https://github.com/ibnsultan/LiteLink-OS/issues) you run into.
+[report issues](https://github.com/ibnsultan/litelink/issues) you run into.
 
 ## What it does
 
@@ -43,7 +43,7 @@ devices are welcome.
 
 ### 1. Write the ISO to a USB stick
 
-Download the ISO from [Releases](https://github.com/ibnsultan/LiteLink-OS/releases), or [build it yourself](#building-from-source). Write it to a USB stick (2 GB or larger) with
+Download the ISO from [Releases](https://github.com/ibnsultan/litelink/releases), or [build it yourself](#building-from-source). Write it to a USB stick (2 GB or larger) with
  a disk imaging utilitie like Rufus or Balena Etcher in **DD image mode**.
 
 Write the image as-is (DD mode). LiteLink keeps your settings in the free space on the stick,
@@ -171,7 +171,7 @@ These appear greyed out in the interface until they're ready:
 
 - **Kiosk mode:** a single connection shown full screen, for shared devices
 - **Connection types:** VNC, remote workspaces (Citrix Workspace, VMware Horizon) and web kiosk
-- **Settings:** Remote connections, Keyboard & input, Sound, Admin lock, Diagnostics
+- **Settings:** Connections, Keyboard & input, Sound, Admin lock, Diagnostics
 - Changing the mode and connection types after installation, from Settings
 
 ## Credits
@@ -182,4 +182,4 @@ Built on [Debian](https://www.debian.org/) 13 with
 [Openbox](http://openbox.org/), [Plymouth](https://gitlab.freedesktop.org/plymouth/plymouth),
 NetworkManager, PipeWire, BlueZ and the [Inter](https://rsms.me/inter/) typeface.
 
-Issues and ideas: [github.com/ibnsultan/LiteLink-OS/issues](https://github.com/ibnsultan/LiteLink-OS/issues)
+Issues and ideas: [github.com/ibnsultan/litelink/issues](https://github.com/ibnsultan/litelink/issues)

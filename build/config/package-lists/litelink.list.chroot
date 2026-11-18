@@ -63,6 +63,9 @@ xserver-xorg-video-fbdev
 xinit
 xauth
 x11-xserver-utils
+# Settings > Keyboard & input: layout (setxkbmap) and mouse / touchpad options (xinput)
+x11-xkb-utils
+xinput
 
 # Window manager
 openbox

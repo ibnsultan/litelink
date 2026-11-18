@@ -743,6 +743,279 @@ def sink_name():
     return m.group(1) if m else "Default output"
 
 
+_WP_NODE = re.compile(r"^(\*)?\s*(\d+)\.\s+(.+?)\s*(?:\[vol: ([\d.]+)( MUTED)?\])?\s*$")
+
+
+def audio_devices():
+    """-> {"sinks": [...], "sources": [...]}, each dict(id, name, default, volume, muted),
+    from `wpctl status` (the Audio section only)."""
+    rc, out = run(["wpctl", "status"])
+    result = {"sinks": [], "sources": []}
+    section = audio = None
+    for raw in out.splitlines():
+        if raw and not raw[0].isspace() and raw[0] not in "│├└":
+            audio = raw.strip() == "Audio"           # Audio / Video / Settings blocks
+            section = None
+            continue
+        if not audio:
+            continue
+        line = raw.strip(" │├└─\t")
+        if line.endswith(":"):
+            section = {"Sinks:": "sinks", "Sources:": "sources"}.get(line)
+            continue
+        if section and line:
+            m = _WP_NODE.match(line)
+            if m:
+                result[section].append({"id": m.group(2), "name": m.group(3), "default": bool(m.group(1)),
+                                        "volume": int(float(m.group(4)) * 100) if m.group(4) else 100,
+                                        "muted": bool(m.group(5))})
+    return result
+
+
+def audio_default(node_id):
+    run(["wpctl", "set-default", str(node_id)])
+
+
+def source_volume_get():
+    rc, out = run(["wpctl", "get-volume", "@DEFAULT_AUDIO_SOURCE@"])
+    m = re.search(r"Volume:\s*([\d.]+)", out)
+    return (int(float(m.group(1)) * 100) if m else 0), ("MUTED" in out)
+
+
+def source_volume_set(pct):
+    run(["wpctl", "set-volume", "@DEFAULT_AUDIO_SOURCE@", f"{max(0, min(100, pct))}%"])
+
+
+def source_mute_set(on):
+    run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", "1" if on else "0"])
+
+
+def play_test_sound():
+    """A short two-note chime on the default output (blocking, ~1 s)."""
+    import math
+    import struct
+    import wave
+    path = "/tmp/litelink-test-sound.wav"
+    if not os.path.exists(path):
+        rate = 44100
+        frames = bytearray()
+        for freq, dur in ((880, 0.18), (1320, 0.32)):
+            n = int(rate * dur)
+            for i in range(n):
+                env = min(1.0, i / 400, (n - i) / 2000)
+                v = int(9000 * env * math.sin(2 * math.pi * freq * i / rate))
+                frames += struct.pack("<hh", v, v)
+        with wave.open(path, "wb") as w:
+            w.setnchannels(2)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(bytes(frames))
+    return run(["pw-play", path], timeout=10)[0] == 0
+
+
+# ---------------------------------------------------------------- keyboard & input
+XKB_RULES = "/usr/share/X11/xkb/rules/evdev.lst"
+
+
+def keyboard_layouts():
+    """-> ([(layout, description)], {layout: [(variant, description)]}) from the XKB rules."""
+    layouts, variants, section = [], {}, None
+    try:
+        with open(XKB_RULES, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("!"):
+                    section = line[1:].strip()
+                    continue
+                parts = line.strip().split(None, 1)
+                if len(parts) != 2:
+                    continue
+                if section == "layout":
+                    layouts.append((parts[0], parts[1]))
+                elif section == "variant":
+                    lay, _, desc = parts[1].partition(": ")
+                    variants.setdefault(lay, []).append((parts[0], desc or parts[1]))
+    except OSError:
+        pass
+    layouts.sort(key=lambda x: x[1].lower())
+    return layouts, variants
+
+
+def keyboard_current():
+    rc, out = run(["setxkbmap", "-query"])
+    q = dict((k.strip(), v.strip()) for k, _, v in (l.partition(":") for l in out.splitlines()))
+    return q.get("layout", "us").split(",")[0], q.get("variant", "").split(",")[0]
+
+
+def pointer_devices():
+    """-> [dict(id, name, touchpad)] for the pointing devices (not the virtual core ones)."""
+    rc, out = run(["xinput", "list"])
+    devs = []
+    for line in out.splitlines():
+        m = re.search(r"[↳ ]*(.+?)\s+id=(\d+)\s+\[slave\s+pointer", line)
+        if m and "XTEST" not in m.group(1):
+            name = m.group(1).strip("⎜↳ \t")
+            devs.append({"id": m.group(2), "name": name, "touchpad": None})
+    for d in devs:
+        rc, props = run(["xinput", "list-props", d["id"]])
+        d["touchpad"] = "libinput Tapping Enabled (" in props
+        d["props"] = props
+    return devs
+
+
+def apply_input(s):
+    """Apply Settings › Keyboard & input (s = cfg.data['input']). Safe to call
+    again: new mice and keyboards are picked up the next time it runs."""
+    if s.get("layout"):
+        cmd = ["setxkbmap", "-layout", s["layout"]]
+        if s.get("variant"):
+            cmd += ["-variant", s["variant"]]
+        run(cmd)
+    run(["xset", "r", "rate", str(int(s.get("repeat_delay", 500))), str(int(s.get("repeat_rate", 25)))])
+    for d in pointer_devices():
+        def prop(name, *vals):
+            if f"{name} (" in d["props"]:
+                run(["xinput", "set-prop", d["id"], name, *map(str, vals)])
+        prop("libinput Accel Speed", round(float(s.get("pointer_speed", 0.0)), 2))
+        prop("libinput Left Handed Enabled", int(bool(s.get("left_handed"))))
+        if d["touchpad"]:
+            prop("libinput Tapping Enabled", int(bool(s.get("tap_to_click", True))))
+            prop("libinput Natural Scrolling Enabled", int(bool(s.get("natural_scroll"))))
+
+
+def input_device_ids():
+    return run(["xinput", "list", "--id-only"])[1]
+
+
+# ---------------------------------------------------------------- diagnostics
+def ping(host, timeout=2.0):
+    """ICMP echo without root (unprivileged ICMP sockets).
+    -> milliseconds, None (no answer) or False (pings aren't allowed here)."""
+    import time
+    try:
+        addr = socket.getaddrinfo(host, None, socket.AF_INET)[0][4][0]
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_ICMP)
+    except PermissionError:
+        return False
+    except OSError:
+        return None
+    try:
+        s.settimeout(timeout)
+        body = b"litelink"
+        t0 = time.monotonic()
+        s.sendto(_icmp_header(body) + body, (addr, 0))
+        s.recv(1024)
+        return round((time.monotonic() - t0) * 1000)
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
+def _icmp_header(body):
+    """Echo request header with its checksum (the kernel fills in the id)."""
+    import struct
+    hdr = struct.pack("!BBHHH", 8, 0, 0, 0, 1)
+    data = hdr + body
+    if len(data) % 2:
+        data += b"\0"
+    total = sum(struct.unpack("!%dH" % (len(data) // 2), data))
+    total = (total >> 16) + (total & 0xFFFF)
+    total += total >> 16
+    return struct.pack("!BBHHH", 8, 0, ~total & 0xFFFF, 0, 1)
+
+
+def tcp_check(host, port, timeout=4.0):
+    """-> (ok, milliseconds or error text)"""
+    import time
+    t0 = time.monotonic()
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True, round((time.monotonic() - t0) * 1000)
+    except socket.gaierror:
+        return False, "name not found"
+    except socket.timeout:
+        return False, "no answer"
+    except ConnectionRefusedError:
+        return False, "refused"
+    except OSError as e:
+        return False, (e.strerror or str(e)).lower()
+
+
+def resolve(host):
+    """-> (ok, first address or error text)"""
+    try:
+        return True, socket.getaddrinfo(host, None)[0][4][0]
+    except OSError:
+        return False, "name not found"
+
+
+def device_health():
+    """Uptime, memory and storage rows for Diagnostics."""
+    rows = []
+    try:
+        up = float(_read("/proc/uptime").split()[0])
+        d, h, m = int(up // 86400), int(up % 86400 // 3600), int(up % 3600 // 60)
+        rows.append(("Uptime", (f"{d} d " if d else "") + f"{h} h {m} min"))
+    except (ValueError, IndexError):
+        pass
+    mem = dict((l.split(":")[0], int(l.split()[1])) for l in _read("/proc/meminfo").splitlines()
+               if len(l.split()) >= 2 and l.split()[1].isdigit())
+    if mem.get("MemTotal"):
+        used = mem["MemTotal"] - mem.get("MemAvailable", 0)
+        rows.append(("Memory in use", f"{human_size(used * 1024)} of {human_size(mem['MemTotal'] * 1024)}"))
+    if mem.get("SwapTotal"):
+        used = mem["SwapTotal"] - mem.get("SwapFree", 0)
+        rows.append(("Compressed swap", f"{human_size(used * 1024)} of {human_size(mem['SwapTotal'] * 1024)}"))
+    for path, label in (("/var/lib/litelink", "Settings storage"), ("/", "System")):
+        try:
+            st = os.statvfs(path)
+            total, free = st.f_blocks * st.f_frsize, st.f_bavail * st.f_frsize
+            if total:
+                rows.append((label, f"{human_size(total - free)} used of {human_size(total)}"))
+                break
+        except OSError:
+            pass
+    load = _read("/proc/loadavg").split()[:3]
+    if load:
+        rows.append(("Load (1, 5, 15 min)", ", ".join(load)))
+    return rows
+
+
+_SECRET = re.compile(r"((?:^|[\s,])(?:password|passwd|psk|wep-key\d|private-key-password|"
+                     r"802-1x\.password|802-11-wireless-security\.psk|/p)[\s:=]+)\S+", re.I)
+
+
+def redact(text):
+    """Hide secrets that commands may have put in a log line (e.g. an old sudo
+    entry for `nmcli device wifi connect X password Y`)."""
+    return _SECRET.sub(lambda m: m.group(1) + "[hidden]", text)
+
+
+def recent_log(lines=300):
+    """This boot's system log (journal) and the shell's own log, newest last,
+    with passwords blanked out."""
+    rc, out = run(["sudo", "-n", "journalctl", "-b", "-n", str(lines), "--no-pager", "-q", "-o", "short"],
+                  timeout=10)
+    shell = ""
+    try:
+        with open("/tmp/litelink-shell.log", errors="replace") as f:
+            shell = "".join(f.readlines()[-80:])
+    except OSError:
+        pass
+    return redact(out), redact(shell)
+
+
+def save_to_usb(dev, name, text):
+    """Write a text file to a USB drive (mounted writable just for this). -> (ok, error)"""
+    try:
+        r = subprocess.run(["sudo", "-n", MEDIA, "save", dev, name], input=text, capture_output=True,
+                           text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
+    err = (r.stderr or "").strip()
+    return r.returncode == 0, err[6:] if err.startswith("ERROR ") else err
+
+
 # ---------------------------------------------------------------- 802.1X (wired)
 def dot1x_get(connection):
     """-> dict(eap, identity, anonymous, ca_cert, client_cert, private_key) ('' = off)."""

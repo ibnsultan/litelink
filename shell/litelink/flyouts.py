@@ -163,18 +163,78 @@ def _connected_row(n):
 
 
 def volume(app):
-    card = _card(280)
+    """Speaker button (mute) · slider · percentage; the output device below it,
+    or the outputs to pick from when there are several."""
+    card = _card(300)
     card.pack_start(ui.label("Volume", "flyout-title"), False, False, 0)
     level, muted = sysinfo.volume_get()
-    card.pack_start(ui.label(sysinfo.sink_name(), "body"), False, False, 0)
+    state = {"muted": muted}
+
+    row = Gtk.Box(spacing=8)
+    spk = ui.add_class(Gtk.Button(), "icon-btn")
+    spk.set_valign(Gtk.Align.CENTER)
+    row.pack_start(spk, False, False, 0)
     scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
     scale.set_draw_value(False)
     scale.set_value(level)
-    scale.connect("value-changed", lambda s: sysinfo.volume_set(int(s.get_value())))
-    card.pack_start(scale, False, False, 0)
-    mute = Gtk.CheckButton(label="Mute", active=muted)
-    mute.connect("toggled", lambda c: sysinfo.mute_set(c.get_active()))
-    card.pack_start(mute, False, False, 0)
+    scale.set_valign(Gtk.Align.CENTER)
+    row.pack_start(scale, True, True, 0)
+    pct = ui.label(f"{level}%", "muted small", xalign=1.0)
+    pct.set_width_chars(6)              # fits "Muted" too, so the slider keeps its length
+    row.pack_start(pct, False, False, 0)
+    card.pack_start(row, False, False, 0)
+
+    def show_mute():
+        m = state["muted"]
+        if spk.get_child():
+            spk.remove(spk.get_child())
+        img = ui.icon("volume_mute" if m else "volume", 20, "#8A8F98" if m else "#3F434B")
+        img.show()
+        spk.add(img)
+        spk.set_tooltip_text("Unmute" if m else "Mute")
+        scale.set_opacity(0.5 if m else 1.0)
+        pct.set_text("Muted" if m else f"{int(scale.get_value())}%")
+
+    def set_muted(m):
+        state["muted"] = m
+        sysinfo.mute_set(m)
+        show_mute()
+
+    def moved(s):
+        sysinfo.volume_set(int(s.get_value()))
+        if state["muted"]:
+            set_muted(False)             # moving the slider unmutes, as on other systems
+        else:
+            pct.set_text(f"{int(s.get_value())}%")
+    scale.connect("value-changed", moved)
+    spk.connect("clicked", lambda *_: set_muted(not state["muted"]))
+    show_mute()
+
+    # Output device: its name, or a pick list when there's more than one
+    sinks = sysinfo.audio_devices()["sinks"]
+    if len(sinks) > 1:
+        card.pack_start(Gtk.Separator(), False, False, 0)
+        card.pack_start(ui.label("Output", "flyout-title"), False, False, 0)
+        outs = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        for s in sinks:
+            b = ui.add_class(Gtk.Button(), "flyout-row")
+            r = Gtk.Box(spacing=10)
+            name = ui.label(s["name"], "body")
+            name.set_ellipsize(3)
+            r.pack_start(name, True, True, 0)
+            if s["default"]:
+                r.pack_start(ui.icon("check", 16, "#2F6FD6", 2), False, False, 0)
+            b.add(r)
+            b.connect("clicked", lambda *_, i=s["id"]: (sysinfo.audio_default(i),
+                                                         app.toggle_flyout("volume", reopen=True)))
+            outs.pack_start(b, False, False, 0)
+        card.pack_start(outs, False, False, 0)
+    else:
+        name = sinks[0]["name"] if sinks else "No sound output found"
+        card.pack_start(ui.label(name, "muted small"), False, False, 0)
+
+    card.pack_start(_link("Sound settings", lambda: _admin(app, lambda: app.open_settings("sound"))),
+                    False, False, 0)
     return card, _bottom(2)
 
 

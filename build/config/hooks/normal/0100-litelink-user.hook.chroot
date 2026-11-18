@@ -23,7 +23,7 @@ cat > /etc/sudoers.d/litelink-shell <<'EOF'
 # nmcli gets Wi-Fi and 802.1X passwords as arguments: don't write its command
 # lines to the system log (sudo logs every command by default)
 Defaults!/usr/bin/nmcli !syslog
-litelink ALL=(root) NOPASSWD: /usr/bin/systemctl poweroff, /usr/bin/systemctl reboot, /usr/bin/nmcli, /usr/sbin/rfkill, /usr/bin/timedatectl, /usr/local/sbin/litelink-state, /usr/local/sbin/litelink-storage, /usr/local/sbin/litelink-media, /usr/local/sbin/litelink-vpn
+litelink ALL=(root) NOPASSWD: /usr/bin/systemctl poweroff, /usr/bin/systemctl reboot, /usr/bin/nmcli, /usr/sbin/rfkill, /usr/bin/timedatectl, /usr/local/sbin/litelink-state, /usr/local/sbin/litelink-storage, /usr/local/sbin/litelink-media, /usr/local/sbin/litelink-vpn, /usr/bin/journalctl
 EOF
 chmod 0755 /usr/local/sbin/litelink-state /usr/local/sbin/litelink-storage /usr/local/sbin/litelink-restore \
     /usr/local/sbin/litelink-media /usr/local/sbin/litelink-vpn

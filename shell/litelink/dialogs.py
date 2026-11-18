@@ -10,7 +10,7 @@ from .config import DEFAULT_CONNECTION, has_credentials, normalize
 
 SETTINGS_GROUPS = [
     ("Connectivity", [("network", "Network", "network"), ("vpn", "VPN", "vpn"),
-                      ("bluetooth", "Bluetooth", "bluetooth"), ("remote", "Remote connections", "remote")]),
+                      ("bluetooth", "Bluetooth", "bluetooth"), ("remote", "Connections", "remote")]),
     ("Device", [("display", "Display", "display"), ("keyboard", "Keyboard & input", "keyboard"),
                 ("sound", "Sound", "sound"), ("time", "Time & region", "time")]),
     # Before installing this is where you install; afterwards it's settings storage
@@ -20,7 +20,8 @@ SETTINGS_GROUPS = [
 ]
 
 # Settings panels that exist today; the others are shown disabled until built.
-READY_PANELS = {"network", "vpn", "display", "bluetooth", "time", "mode", "storage", "about"}
+READY_PANELS = {"network", "vpn", "bluetooth", "remote", "display", "keyboard", "sound", "time",
+                "mode", "storage", "about", "diag"}
 
 RESOLUTIONS = [("fullscreen", "Full screen (match monitor)"), ("1920x1080", "1920 × 1080"),
                ("1600x900", "1600 × 900"), ("1280x800", "1280 × 800"), ("1024x768", "1024 × 768")]
@@ -886,6 +887,22 @@ class SettingsWindow(Gtk.Box):
     def _panel_vpn(self, page):
         from . import vpn
         vpn.panel(self, page)
+
+    def _panel_sound(self, page):
+        from . import panels
+        panels.sound(self, page)
+
+    def _panel_keyboard(self, page):
+        from . import panels
+        panels.keyboard(self, page)
+
+    def _panel_remote(self, page):
+        from . import panels
+        panels.connections(self, page)
+
+    def _panel_diag(self, page):
+        from . import panels
+        panels.diagnostics(self, page)
 
     def _panel_bluetooth(self, page):
         ad = system.bt_adapter()

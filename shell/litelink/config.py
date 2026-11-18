@@ -39,6 +39,9 @@ DEFAULTS = {
     "kiosk_connection": "",       # id of the connection kiosk mode opens (empty = the first one)
     # Admin password: unlocks the lock screen and, in kiosk mode, Settings.
     "lock_password_sha256": "",   # empty = no password
+    # Settings › Keyboard & input (empty layout = the system's own)
+    "input": {"layout": "", "variant": "", "repeat_delay": 500, "repeat_rate": 25,
+              "pointer_speed": 0.0, "left_handed": False, "tap_to_click": True, "natural_scroll": False},
     "clock_24h": True,
     "date_format": "short",       # see DATE_FORMATS
 }

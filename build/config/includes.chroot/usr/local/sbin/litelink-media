@@ -1,9 +1,10 @@
 #!/usr/bin/python3
-"""LiteLink OS: read-only access to USB drives (run as root via sudo by the shell).
+"""LiteLink OS: access to USB drives (run as root via sudo by the shell).
 
   litelink-media list             JSON: USB drive partitions LiteLink can read
   litelink-media mount DEV        mount DEV read-only, print the mount point
   litelink-media unmount [DEV]    unmount DEV (or every drive mounted here)
+  litelink-media save DEV NAME    write stdin to the file NAME on DEV (Diagnostics report)
 
 Used to bring files in (e.g. a WireGuard .conf). Only USB / removable drives with
 FAT32, exFAT or NTFS are offered, never the LiteLink boot stick or the internal
@@ -102,6 +103,40 @@ def cmd_unmount(dev=None):
             pass
 
 
+def cmd_save(dev, name):
+    """Write a small text file (stdin) to the top folder of a USB drive. The
+    drive is mounted writable only for the copy, then unmounted again (synced:
+    it's safe to pull out afterwards). The file is read from
+    stdin (never a path), so this can't copy files from the system."""
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", name) or name.startswith("."):
+        raise RuntimeError("invalid file name")
+    data = sys.stdin.buffer.read(5 * 1024 * 1024 + 1)
+    if len(data) > 5 * 1024 * 1024:
+        raise RuntimeError("file too large")
+    d = next((x for x in drives() if x["path"] == dev), None)
+    if not d:
+        raise RuntimeError("not a USB drive")
+    if d["mountpoint"]:                 # one mount per device: drop the read-only one first
+        cmd_unmount(dev)
+    mp = target(dev) + "-rw"
+    os.makedirs(mp, mode=0o755, exist_ok=True)
+    opts = f"rw,nosuid,nodev,noexec,uid={USER_UID},gid={USER_GID},umask=022"
+    r = subprocess.run(["mount", "-t", DRIVERS[d["fstype"]], "-o", opts, dev, mp], capture_output=True, text=True)
+    if r.returncode != 0:
+        os.rmdir(mp)
+        raise RuntimeError((r.stderr or "mount failed").strip()[:200])
+    try:
+        with open(os.path.join(mp, name), "wb") as f:
+            f.write(data)
+    finally:
+        subprocess.run(["sync"])
+        subprocess.run(["umount", mp], capture_output=True)
+        try:
+            os.rmdir(mp)
+        except OSError:
+            pass
+
+
 def main():
     args = sys.argv[1:]
     try:
@@ -111,6 +146,8 @@ def main():
             print(cmd_mount(args[1]))
         elif args and args[0] == "unmount" and len(args) <= 2:
             cmd_unmount(args[1] if len(args) == 2 else None)
+        elif len(args) == 3 and args[0] == "save":
+            cmd_save(args[1], args[2])
         else:
             print(__doc__, file=sys.stderr)
             return 2

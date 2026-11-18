@@ -571,6 +571,7 @@ class Shell(Gtk.Window):
 
     def autostart(self):
         self._restore_display()
+        self._start_input()
         # Boot menu "Install LiteLink OS" -> open the installer straight away
         if system.boot_option("litelink.install"):
             from .storage import Installer
@@ -584,6 +585,24 @@ class Shell(Gtk.Window):
             GLib.timeout_add(600, lambda: (self.start_session(auto), False)[1])
         else:
             GLib.timeout_add(2500, lambda: (self._offer_usb_storage(), False)[1])
+
+    # -- Keyboard & input: applied at startup and to devices plugged in later ----
+    def _start_input(self):
+        self._input_ids = None
+        self._check_input()
+        GLib.timeout_add_seconds(5, self._check_input)
+
+    def _check_input(self):
+        def work():
+            ids = system.input_device_ids()
+            if ids != self._input_ids:          # first run, or a mouse / keyboard came or went
+                system.apply_input(self.cfg.data.get("input") or {})
+            return ids
+
+        def done(ids):
+            self._input_ids = ids
+        system.in_background(work, done)
+        return True
 
     def _restore_display(self):
         """Re-apply a resolution the user kept (saved with persistent settings)."""
