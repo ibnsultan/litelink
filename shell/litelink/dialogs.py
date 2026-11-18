@@ -4,7 +4,7 @@ import copy
 from gi.repository import Gdk, GLib, Gtk
 
 from . import system, ui
-from .config import DEFAULT_CONNECTION, normalize
+from .config import DEFAULT_CONNECTION, has_credentials, normalize
 
 SETTINGS_GROUPS = [
     ("Connectivity", [("network", "Network", "network"), ("vpn", "VPN", "vpn"),
@@ -12,13 +12,13 @@ SETTINGS_GROUPS = [
     ("Device", [("display", "Display", "display"), ("keyboard", "Keyboard & input", "keyboard"),
                 ("sound", "Sound", "sound"), ("time", "Time & region", "time")]),
     # Before installing this is where you install; afterwards it's settings storage
-    ("System", [("storage", "Storage" if system.is_installed() else "Install", "storage"),
-                ("about", "About", "system"),
-                ("lock", "Admin lock", "lock"), ("diag", "Diagnostics", "diag")]),
+    ("System", [("mode", "System", "monitor"),
+                ("storage", "Storage" if system.is_installed() else "Install", "storage"),
+                ("diag", "Diagnostics", "diag"), ("about", "About", "system")]),
 ]
 
 # Settings panels that exist today; the others are shown disabled until built.
-READY_PANELS = {"network", "vpn", "display", "bluetooth", "time", "storage", "about"}
+READY_PANELS = {"network", "vpn", "display", "bluetooth", "time", "mode", "storage", "about"}
 
 RESOLUTIONS = [("fullscreen", "Full screen (match monitor)"), ("1920x1080", "1920 × 1080"),
                ("1600x900", "1600 × 900"), ("1280x800", "1280 × 800"), ("1024x768", "1024 × 768")]
@@ -65,6 +65,81 @@ def small_dialog(title):
     dlg.pack_start(handle, False, False, 0)
     ui.make_draggable(outer, handle)
     return outer, dlg
+
+
+def admin_password_dialog(app, on_ok):
+    """Ask for the admin password (Settings locked in Admin lock)."""
+    outer, dlg = small_dialog("Admin password")
+    dlg.pack_start(ui.label("Enter the admin password to open Settings.", "muted body", wrap=True), False, False, 0)
+    pw = entry("", "Password", secret=True)
+    dlg.pack_start(pw, False, False, 0)
+    status = ui.label("", "small")
+    dlg.pack_start(status, False, False, 0)
+
+    def ok(*_):
+        if app.cfg.check_lock_password(pw.get_text()):
+            app.pop_layer()
+            on_ok()
+        else:
+            pw.set_text("")
+            status.set_markup('<span foreground="#C53030">That password isn’t right.</span>')
+    pw.connect("activate", ok)
+    row = Gtk.Box(spacing=10, halign=Gtk.Align.END)
+    row.pack_start(ui.button("Cancel", "btn", app.pop_layer), False, False, 0)
+    row.pack_start(ui.button("Open Settings", "btn btn-primary", ok), False, False, 0)
+    dlg.pack_start(row, False, False, 0)
+    app.push_layer(outer, "light")
+    GLib.idle_add(pw.grab_focus)
+
+
+def set_admin_password_dialog(app, on_done=None):
+    """Set, change or remove the admin password (Settings › Admin lock / System)."""
+    has = app.cfg.lock_needs_password()
+    outer, dlg = small_dialog("Change admin password" if has else "Set admin password")
+    cur = entry("", "", secret=True)
+    new = entry("", "", secret=True)
+    again = entry("", "", secret=True)
+    if has:
+        dlg.pack_start(field("Current password", cur), False, False, 0)
+    dlg.pack_start(field("New password", new), False, False, 0)
+    dlg.pack_start(field("Confirm new password", again), False, False, 0)
+    status = ui.label("", "small")
+    dlg.pack_start(status, False, False, 0)
+
+    def err(text):
+        status.set_markup(f'<span foreground="#C53030">{text}</span>')
+
+    def done():
+        app.pop_layer()
+        if on_done:
+            on_done()
+
+    def save(*_):
+        if has and not app.cfg.check_lock_password(cur.get_text()):
+            return err("The current password isn’t right.")
+        if len(new.get_text()) < 4:
+            return err("Use at least 4 characters.")
+        if new.get_text() != again.get_text():
+            return err("The passwords don’t match.")
+        app.cfg.set_lock_password(new.get_text())
+        done()
+
+    def remove():
+        if not app.cfg.check_lock_password(cur.get_text()):
+            return err("Enter the current password to remove it.")
+        app.cfg.set_lock_password("")
+        app.cfg.data["settings_locked"] = False
+        app.cfg.save()
+        done()
+    again.connect("activate", save)
+    row = Gtk.Box(spacing=10)
+    if has:
+        row.pack_start(ui.button("Remove password", "btn", remove), False, False, 0)
+    row.pack_end(ui.button("Save", "btn btn-primary", save), False, False, 0)
+    row.pack_end(ui.button("Cancel", "btn", app.pop_layer), False, False, 0)
+    dlg.pack_start(row, False, False, 0)
+    app.push_layer(outer, "light")
+    GLib.idle_add((cur if has else new).grab_focus)
 
 
 def set_time_dialog(app, on_done=None):
@@ -1076,6 +1151,90 @@ class SettingsWindow(Gtk.Box):
             self._confirm_display(d["output"], old, new)
         row.pack_start(ui.button("Apply", "btn btn-primary", apply), False, False, 0)
         page.pack_start(row, False, False, 0)
+
+    # -- System: Standard or Kiosk ---------------------------------------------
+    def _panel_mode(self, page):
+        cfg = self.app.cfg
+        self.set_header("How this device starts. Either mode works with any connection.")
+        g = self._list_group(page)
+        std = Gtk.RadioButton()
+        kiosk = Gtk.RadioButton.new_from_widget(std)
+        for r in (std, kiosk):
+            r.set_valign(Gtk.Align.CENTER)
+        (kiosk if cfg.mode == "kiosk" else std).set_active(True)
+        self._list_row(g, "Standard", "Desktop with your connection tiles", std)
+        self._list_row(g, "Kiosk", "Starts one connection full screen and nothing else, for shared devices "
+                                   "like school labs", kiosk)
+
+        def picked(r, mode):
+            if r.get_active() and cfg.data.get("mode") != mode:
+                cfg.data["mode"] = mode
+                cfg.save()
+                self.show("mode")
+        std.connect("toggled", picked, "standard")
+        kiosk.connect("toggled", picked, "kiosk")
+        # Kiosk settings stay visible in Standard mode, disabled until Kiosk is picked
+        sec = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        page.pack_start(sec, False, False, 0)
+        self._kiosk_section(sec)
+        sec.set_sensitive(cfg.mode == "kiosk")
+        self._admin_section(page)
+
+    def _kiosk_section(self, page):
+        cfg = self.app.cfg
+        page.pack_start(ui.add_class(ui.label("KIOSK", "group-title"), "section-title"), False, False, 0)
+        g2 = self._list_group(page)
+        conn = cfg.kiosk_conn()
+        if cfg.connections:
+            pick = combo([(c["id"], c["name"]) for c in cfg.connections], conn["id"])
+            pick.set_size_request(200, -1)
+
+            def chose(c):
+                cfg.data["kiosk_connection"] = c.get_active_id()
+                cfg.save()
+                self.show("mode")
+            pick.connect("changed", chose)
+            self._list_row(g2, "Connection", "Opens full screen at startup and after every sign-out", pick)
+            if conn.get("protocol") == "web":
+                sub = (f"{conn['name']} opens straight away; people sign in on the page itself. "
+                       "End session at the top edge clears everything for the next person.")
+                value = "On the page"
+            elif has_credentials(conn):
+                sub = (f"{conn['name']} has a saved username and password, so it signs in by itself. "
+                       "Remove the password in the connection to have each person sign in.")
+                value = "Automatic"
+            else:
+                sub = (f"No username and password are saved in {conn['name']}, so each person enters "
+                       "their own. Save both in the connection to sign in automatically.")
+                value = "Each person"
+            self._list_row(g2, "Sign-in", sub, self._value(value))
+        else:
+            self._list_row(g2, "Connection", "None yet. Add one with the Add connection button "
+                                             "on the kiosk screen.", None)
+        page.pack_start(ui.label("Kiosk mode starts when you close Settings. To come back here, use the "
+                                 "Settings button in the kiosk’s corner.", "muted body", wrap=True),
+                        False, False, 0)
+
+    # -- Admin: one password for the device (lock screen, Settings) -------------
+    def _admin_section(self, page):
+        cfg = self.app.cfg
+        page.pack_start(ui.add_class(ui.label("ADMIN", "group-title"), "section-title"), False, False, 0)
+        g = self._list_group(page)
+        has = cfg.lock_needs_password()
+        btn = ui.button("Change password" if has else "Set password", "btn",
+                        lambda: set_admin_password_dialog(self.app, lambda: self.show("mode")))
+        btn.set_valign(Gtk.Align.CENTER)
+        self._list_row(g, "Admin password",
+                       "Unlocks the lock screen and, in kiosk mode, Settings" if has else
+                       "Not set. Anyone can open Settings and leave kiosk mode.", btn)
+        sw = Gtk.Switch(active=bool(cfg.data.get("settings_locked")) and has, valign=Gtk.Align.CENTER)
+
+        def toggled(s, *_):
+            cfg.data["settings_locked"] = s.get_active()
+            cfg.save()
+        sw.connect("notify::active", toggled)
+        self._list_row(g, "Ask for it to open Settings",
+                       "Kiosk mode always asks" if has else "Set a password first", sw, enabled=has)
 
     def _panel_about(self, page):
         info = system.about()

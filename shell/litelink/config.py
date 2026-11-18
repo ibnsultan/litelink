@@ -12,6 +12,7 @@ import uuid
 
 SYSTEM_FILE = "/etc/litelink/litelink.json"
 USER_FILE = os.path.expanduser("~/.config/litelink/litelink.json")
+INSTALL_FILE = "/var/lib/litelink/install.json"   # installer choices (written by litelink-storage)
 
 DEFAULT_CONNECTION = {
     "id": "",
@@ -30,9 +31,14 @@ DEFAULT_CONNECTION = {
     "devices": {"clipboard": True, "audio": True, "microphone": False, "usb": False, "smartcard": False},
 }
 
+WEB_PROTOCOLS = ("web",)
+
 DEFAULTS = {
     "connections": [],
-    "lock_password_sha256": "",   # empty = lock screen unlocks without a password
+    "mode": "",                   # standard | kiosk; empty = what was chosen when installing
+    "kiosk_connection": "",       # id of the connection kiosk mode opens (empty = the first one)
+    # Admin password: unlocks the lock screen and, in kiosk mode, Settings.
+    "lock_password_sha256": "",   # empty = no password
     "clock_24h": True,
     "date_format": "short",       # see DATE_FORMATS
 }
@@ -117,13 +123,39 @@ class Config:
         self.data["connections"] = [c for c in self.connections if c["id"] != cid]
         self.save()
 
-    # -- lock --------------------------------------------------------------
+    # -- mode --------------------------------------------------------------
+    @property
+    def mode(self):
+        """standard | kiosk. Settings › System wins; until it's changed there,
+        the mode chosen in the installer (state/install.json)."""
+        m = self.data.get("mode")
+        if m in ("standard", "kiosk"):
+            return m
+        return "kiosk" if _read(INSTALL_FILE).get("mode") == "kiosk" else "standard"
+
+    def kiosk_conn(self):
+        """The connection kiosk mode opens, or None when there's none yet."""
+        return self.get(self.data.get("kiosk_connection", "")) or (self.connections[0] if self.connections else None)
+
+    # -- lock / admin password ----------------------------------------------
     def lock_needs_password(self):
         return bool(self.data.get("lock_password_sha256"))
 
     def check_lock_password(self, pw):
         want = self.data.get("lock_password_sha256", "")
         return not want or hashlib.sha256(pw.encode()).hexdigest() == want
+
+    def set_lock_password(self, pw):
+        self.data["lock_password_sha256"] = hashlib.sha256(pw.encode()).hexdigest() if pw else ""
+        self.save()
+
+
+def has_credentials(conn):
+    """Nothing to ask before connecting: web sessions sign in on the page itself;
+    RDP needs both the username and the password saved."""
+    if conn.get("protocol") in WEB_PROTOCOLS:
+        return True
+    return bool(conn.get("username")) and bool(conn.get("password"))
 
 
 def normalize(conn):

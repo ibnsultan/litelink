@@ -205,6 +205,9 @@ def connecting(app, conn):
 
 
 ERRORS = {
+    # Not an error: asked before connecting when no username or password is saved
+    "signin": dict(title="Sign in to {name}", body="Enter your account for {host}.",
+                   color="blue", icon="lock", fg="#FFFFFF"),
     "unreachable": dict(title="Couldn’t connect to {name}",
                         body="{host} didn’t respond. Check that the computer is on and connected to the network, then try again.",
                         color="amber", icon="warn", fg="#2B1A00"),
@@ -224,6 +227,12 @@ ERRORS = {
 
 
 def error(app, conn, kind, code, details, extra=None):
+    """Full-screen result of a connection attempt. In kiosk mode there's no
+    desktop to go back to and nothing to edit: errors retry by themselves and
+    Back returns to the kiosk screen."""
+    kiosk = getattr(app, "kiosk", None) is not None
+    back_label = "Back" if kiosk else "Back to desktop"
+    back = (lambda: app.kiosk_home(autoconnect=False)) if kiosk else app.pop_layer
     spec = ERRORS.get(kind, ERRORS["unreachable"])
     fmt = dict(conn, **(extra or {}))
     col = _column(12)
@@ -239,7 +248,7 @@ def error(app, conn, kind, code, details, extra=None):
             GLib.source_remove(state["timer"])
             state["timer"] = None
 
-    if kind == "auth":
+    if kind in ("auth", "signin"):
         form = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, halign=Gtk.Align.CENTER, margin_top=10)
         form.set_size_request(360, -1)
         from .dialogs import field
@@ -250,9 +259,12 @@ def error(app, conn, kind, code, details, extra=None):
         col.pack_start(form, False, False, 0)
         signin = lambda *_: app.start_session(conn, password=pw.get_text(), username=user.get_text().strip())
         pw.connect("activate", signin)
-        buttons.pack_start(ui.button("Sign in", "btn pill btn-primary", signin), False, False, 0)
-        buttons.pack_start(ui.button("Back to desktop", "btn pill btn-ghost", app.pop_layer), False, False, 0)
-        GLib.idle_add(pw.grab_focus)
+        user.connect("activate", lambda *_: pw.grab_focus())
+        buttons.pack_start(ui.button("Connect" if kind == "signin" else "Sign in", "btn pill btn-primary", signin),
+                           False, False, 0)
+        buttons.pack_start(ui.button("Cancel" if kind == "signin" else back_label, "btn pill btn-ghost", back),
+                           False, False, 0)
+        GLib.idle_add((pw if user.get_text() else user).grab_focus)
     elif kind == "certificate":
         remember = Gtk.CheckButton(label="Remember this certificate", halign=Gtk.Align.CENTER)
         col.pack_start(remember, False, False, 0)
@@ -262,10 +274,10 @@ def error(app, conn, kind, code, details, extra=None):
                 conn["ignore_cert"] = True
                 app.save_connection(conn)
             app.start_session(conn, ignore_cert=True)
-        buttons.pack_start(ui.button("Cancel", "btn pill btn-primary", app.pop_layer), False, False, 0)
+        buttons.pack_start(ui.button("Cancel", "btn pill btn-primary", back), False, False, 0)
         buttons.pack_start(ui.button("Connect anyway", "btn pill btn-ghost", anyway), False, False, 0)
     elif kind == "ended":
-        reconnect = lambda: app.start_session(conn)
+        reconnect = lambda: app.start_session(conn, **(extra or {}).get("creds", {}))
         if conn.get("reconnect"):
             # The countdown rides in the button: "Reconnect now | 5"
             btn, count = ui.count_button("Reconnect now", "btn pill btn-primary", reconnect)
@@ -284,13 +296,35 @@ def error(app, conn, kind, code, details, extra=None):
             state["timer"] = GLib.timeout_add_seconds(1, tick)
         else:
             buttons.pack_start(ui.button("Reconnect now", "btn pill btn-primary", reconnect), False, False, 0)
-        buttons.pack_start(ui.button("Back to desktop", "btn pill btn-ghost", app.pop_layer), False, False, 0)
+        buttons.pack_start(ui.button(back_label, "btn pill btn-ghost", back), False, False, 0)
+    elif kiosk:
+        # Unattended: try again by itself ("Try again | 30"), or go back to the kiosk screen
+        retry = lambda: app.start_session(conn, **(extra or {}).get("creds", {}))
+        btn, count = ui.count_button("Try again", "btn pill btn-primary", retry)
+        btn.set_tooltip_text("Tries again automatically when the count reaches 0")
+        buttons.pack_start(btn, False, False, 0)
+        left = {"n": 30}
+
+        def tick():
+            if left["n"] <= 0:
+                state["timer"] = None
+                retry()
+                return False
+            count.set_text(str(left["n"]))
+            left["n"] -= 1
+            return True
+        tick()
+        state["timer"] = GLib.timeout_add_seconds(1, tick)
+        buttons.pack_start(ui.button("Back", "btn pill btn-ghost", back), False, False, 0)
     else:
         buttons.pack_start(ui.button("Try again", "btn pill btn-primary",
                                      lambda: app.start_session(conn)), False, False, 0)
         buttons.pack_start(ui.button("Edit connection", "btn pill btn-ghost",
                                      lambda: (app.pop_layer(), app.edit_connection(conn))), False, False, 0)
     col.pack_start(buttons, False, False, 0)
+    if kind == "signin":
+        col.connect("destroy", lambda *_: stop())
+        return col
 
     # Show details: the raw FreeRDP result, for IT
     text = "WireGuard (NetworkManager)" if kind == "vpn" else f"xfreerdp3 exit code {code}"

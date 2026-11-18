@@ -375,7 +375,7 @@ class Installer:
         kiosk.connect("toggled", lambda r: r.get_active() and setattr(self, "mode", "kiosk"))
         self._row(modes, "Standard", "Desktop with your connection tiles", std)
         self._row(modes, "Kiosk", "Starts one connection full screen and nothing else, for shared devices "
-                  "like school labs", kiosk, sep=False, enabled=False)       # not built yet
+                  "like school labs", kiosk, sep=False)
         box.pack_start(modes, False, False, 0)
 
         head = Gtk.Box()

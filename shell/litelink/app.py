@@ -16,7 +16,7 @@ gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 from . import system, ui  # noqa: E402
-from .config import Config  # noqa: E402
+from .config import WEB_PROTOCOLS, Config, has_credentials  # noqa: E402
 
 # Sky wallpaper: (offset, colour) stops and soft cloud ellipses (cx, cy, rx, ry, alpha)
 SKY = [(0.0, "#1E4E9C"), (0.38, "#3D7ACC"), (0.72, "#8DB9EA"), (1.0, "#D6E7F8")]
@@ -89,9 +89,12 @@ class Shell(Gtk.Window):
         self.set_decorated(False)
         self.cfg = Config()
         self.session = None
+        self.kiosk = None         # KioskView while in kiosk mode
+        self._creds = {}          # username / password typed for the current attempt
         self.layers = []          # stack of (container, kind, on_close)
         self.flyout = None
         self.flyout_name = None
+        self._flyout_anchor = None
 
         self.root = Gtk.Overlay()
         self.add(self.root)
@@ -339,8 +342,15 @@ class Shell(Gtk.Window):
         return False
 
     # ================================================================ flyouts
-    def toggle_flyout(self, name):
-        if self.flyout_name == name:
+    def toggle_flyout(self, name, anchor=None, reopen=False):
+        """Open (or close) a flyout next to its dock button. anchor=(left, bottom)
+        places it elsewhere, e.g. above the kiosk screen's network pill; reopen
+        rebuilds an open flyout in place (fresh status), keeping its anchor."""
+        if reopen:
+            if self.flyout_name != name:
+                return
+            anchor = self._flyout_anchor
+        elif self.flyout_name == name:
             self.close_flyout()
             return
         self.close_flyout()
@@ -349,6 +359,10 @@ class Shell(Gtk.Window):
         card, slot = builder(self)
         catcher = Gtk.EventBox()
         catcher.set_margin_start(76)
+        if anchor is not None:
+            catcher.set_margin_start(max(0, anchor[0] - 12))
+            slot = anchor[1]
+        self._flyout_anchor = anchor
         catcher.connect("button-press-event", lambda *_: (self.close_flyout(), True)[1])
         # slot >= 0: bottom margin of the dock button; < 0: anchored to the top
         top = slot < 0
@@ -379,20 +393,69 @@ class Shell(Gtk.Window):
         self._set_active(None)
 
     # ================================================================ actions
-    def edit_connection(self, conn):
+    def edit_connection(self, conn, on_close=None):
         self.close_flyout()
         from .dialogs import ConnectionDialog
         dlg = ConnectionDialog(self, conn)
-        self.push_layer(dlg, "light")
+        self.push_layer(dlg, "light", on_close=on_close)
 
     def save_connection(self, conn):
         self.cfg.upsert(conn)
         self.refresh_desktop()
+        if self.kiosk is not None:
+            # e.g. the kiosk's first connection was just added: once its dialog
+            # has closed, show (or connect with) it
+            GLib.timeout_add(100, lambda: (self.kiosk is not None and not self.session and not self.layers
+                                           and self.kiosk_home(), False)[1])
 
-    def open_settings(self, panel="network"):
+    def open_settings(self, panel="network", unlocked=False):
+        """Settings. Behind the admin password when it's set and either the
+        device is a kiosk (the kiosk screen asks) or Admin lock says so."""
         self.close_flyout()
+        if (not unlocked and self.kiosk is None and self.cfg.data.get("settings_locked")
+                and self.cfg.lock_needs_password()):
+            from .dialogs import admin_password_dialog
+            admin_password_dialog(self, lambda: self.open_settings(panel, unlocked=True))
+            return
         from .dialogs import SettingsWindow
-        self.push_layer(SettingsWindow(self, panel), "clear")
+        # Closing Settings applies a mode change (Settings › System)
+        self.push_layer(SettingsWindow(self, panel), "clear", on_close=self.apply_mode)
+
+    # ================================================================ modes
+    def apply_mode(self):
+        """Show the desktop or the kiosk, whichever Settings › System says."""
+        if self.cfg.mode == "kiosk":
+            if self.kiosk is None:
+                from .kiosk import KioskView
+                self.close_flyout()
+                self.kiosk = KioskView(self)
+                self.root.add_overlay(self.kiosk)
+                # Layers already open (e.g. Settings closing) stay above it
+                for entry in self.layers:
+                    self.root.reorder_overlay(entry["widget"], -1)
+                self.kiosk.show_all()
+                self.kiosk_home(startup=True)
+            elif not self.layers:
+                self.kiosk_home()
+        elif self.kiosk is not None:
+            self.root.remove(self.kiosk)
+            self.kiosk.destroy()
+            self.kiosk = None
+            self.refresh_desktop()
+
+    def kiosk_home(self, error=None, username=None, startup=False, autoconnect=True):
+        """Back to the kiosk screen; connects by itself when the connection has
+        a saved username and password."""
+        if self.kiosk is None:
+            return
+        self.clear_layers()
+        conn = self.cfg.kiosk_conn()
+        self.kiosk.home(error, username)
+        from .kiosk import should_autoconnect
+        if autoconnect and not error and should_autoconnect(conn):
+            GLib.timeout_add(600 if startup else 300, lambda: (
+                self.kiosk is not None and not self.session and not self.layers and self.start_session(conn),
+                False)[1])
 
     def show_power_menu(self):
         self.close_flyout()
@@ -418,7 +481,18 @@ class Shell(Gtk.Window):
         if not conn["host"]:
             self.edit_connection(conn)
             return
+        # No saved username or password: ask first (the kiosk asks on its own screen)
+        if password is None and not has_credentials(conn):
+            if self.kiosk is not None:
+                self.kiosk_home(autoconnect=False)
+            else:
+                self.push_layer(screens.error(self, conn, "signin", 0, ""), "dark")
+            return
         pw = password if password is not None else conn.get("password", "")
+        self._creds = {k: v for k, v in (("password", password), ("username", username), ("domain", domain))
+                       if v is not None}
+        if self.kiosk is not None:
+            self.kiosk.home()          # clear what was typed (and any old message) under the session
         layer = self.push_layer(screens.connecting(self, conn), "dark", closable=False)
 
         def launch():
@@ -453,8 +527,9 @@ class Shell(Gtk.Window):
                 launch()
             else:
                 self.pop_layer(layer)
-                self.push_layer(screens.error(self, conn, "vpn", 0, err, extra={"vpn_name": name or "VPN"}),
-                                "dark")
+                self.push_layer(screens.error(self, conn, "vpn", 0, err,
+                                              extra={"vpn_name": name or "VPN", "creds": self._creds}),
+                                "dark", closable=self.kiosk is None)
         system.in_background(bring_up, ready)
 
     def cancel_session(self):
@@ -464,17 +539,34 @@ class Shell(Gtk.Window):
             self._vpn_wait["cancelled"] = True
             self.pop_layer(self._vpn_wait["layer"])
             self._vpn_wait = None
+            if self.kiosk is not None:
+                self.kiosk_home(autoconnect=False)
 
     def _session_ended(self, conn, layer, kind, code, text, seconds):
         from . import screens
+        cancelled = self.session is not None and self.session.cancelled
         self.session = None
         self.pop_layer(layer)
-        if kind == "closed":
+        creds, self._creds = self._creds, {}
+        if self.kiosk is not None:
+            if kind == "closed":
+                # Signed out: ready for the next person. A session that closed at
+                # once (cancelled, or the server refused it) doesn't loop. A web
+                # session ended with End session starts again fresh.
+                web_end = conn.get("protocol") in WEB_PROTOCOLS and cancelled
+                self.kiosk_home(autoconnect=web_end or (not cancelled and seconds > 5))
+                return False
+            if kind == "auth":
+                self.kiosk_home(error="The username or password wasn’t accepted.",
+                                username=creds.get("username", conn.get("username", "")))
+                return False
+        elif kind == "closed":
             return False
         # A drop after a working session is "ended"; a fast failure is a connect error.
         if kind == "unreachable" and seconds > 20:
             kind = "ended"
-        self.push_layer(screens.error(self, conn, kind, code, text), "dark", closable=kind != "ended")
+        self.push_layer(screens.error(self, conn, kind, code, text, extra={"creds": creds}), "dark",
+                        closable=kind != "ended" and self.kiosk is None)
         return False
 
     def autostart(self):
@@ -483,6 +575,9 @@ class Shell(Gtk.Window):
         if system.boot_option("litelink.install"):
             from .storage import Installer
             GLib.timeout_add(800, lambda: (Installer(self).open(), False)[1])
+            return
+        if self.cfg.mode == "kiosk":
+            self.apply_mode()          # the kiosk screen, connecting by itself if it can
             return
         auto = next((c for c in self.cfg.connections if c.get("auto")), None)
         if auto:

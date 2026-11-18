@@ -65,6 +65,8 @@ tooltip label { color: #FFFFFF; font-size: 12px; }
 .flyout-header { background-color: #2F6FD6; border-radius: 14px 14px 0 0; padding: 14px 16px; }
 .flyout-header label { color: #FFFFFF; font-size: 14px; font-weight: 600; }
 .group-title { font-size: 11px; font-weight: 600; color: #2659B3; }
+/* Disabled sections (e.g. Kiosk settings in Standard mode): explicit colours grey out too */
+.group-title:disabled, .muted:disabled { color: #A3A8B0; }
 .row-btn {
   border: none; background: transparent; box-shadow: none; border-radius: 8px;
   padding: 8px 12px;
@@ -262,6 +264,17 @@ radio:checked { background-color: #2F6FD6; border-color: #2F6FD6; color: #FFFFFF
 .round-glass { background: rgba(255, 255, 255, 0.16); border-radius: 22px; min-width: 40px; min-height: 40px; border: none; box-shadow: none; padding: 0; }
 .round-glass:hover { background: rgba(255, 255, 255, 0.26); }
 .round-blue { background: #2F6FD6; border-radius: 18px; min-width: 36px; min-height: 36px; border: none; box-shadow: none; padding: 0; }
+/* Kiosk screen: the lock screen's look; sign-in / admin password in the middle */
+.kiosk label { color: #FFFFFF; }
+.kiosk .kiosk-sub { color: rgba(255, 255, 255, 0.8); font-size: 13px; }
+.kiosk entry.kiosk-field { border-radius: 999px; min-height: 44px; padding: 0 16px; background-color: rgba(255, 255, 255, 0.16); border: 1px solid rgba(255, 255, 255, 0.35); color: #FFFFFF; box-shadow: none; }
+.kiosk entry.kiosk-field:focus { border-color: #FFFFFF; background-color: rgba(255, 255, 255, 0.22); }
+.kiosk entry.kiosk-field:disabled { color: rgba(255, 255, 255, 0.6); background-color: rgba(255, 255, 255, 0.10); }
+.kiosk entry.kiosk-field image { color: rgba(255, 255, 255, 0.7); }
+.kiosk .kiosk-error { font-weight: 500; text-shadow: 0 1px 6px rgba(0, 0, 0, 0.35); }
+.kiosk-link { border: none; background: transparent; box-shadow: none; padding: 4px 8px; }
+.kiosk-link label { color: rgba(255, 255, 255, 0.85); font-size: 13px; }
+.kiosk-link:hover label { color: #FFFFFF; text-decoration: underline; }
 /* Install wizard (full screen, separate from Settings) */
 .wizard-scrim { background-color: rgba(14, 26, 52, 0.28); }
 .wizard-card { background-color: #FFFFFF; border-radius: 18px; box-shadow: 0 30px 80px rgba(10, 20, 40, 0.35); }
