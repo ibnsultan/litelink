@@ -1,0 +1,27 @@
+#!/bin/sh
+# Web engine as its own image module: live/web.squashfs.
+#
+# The base image (filesystem.squashfs) leaves Chromium out (config/rootfs/excludes).
+# This hook, which runs right after the base image is made (cwd: binary/), packs the
+# same files into web.squashfs. live-boot stacks every *.squashfs in /live, so:
+#   - the USB stick has both: every feature works when running from it;
+#   - the installer copies web.squashfs only when Web kiosk is ticked, so devices
+#     installed without it carry no browser engine (~140 MB less).
+# Everything Chromium installs outside /usr/lib/chromium is tiny (launcher script,
+# icons, licences) and stays in the base image; the shell checks for the engine
+# itself (/usr/lib/chromium/chromium).
+set -e
+
+SRC=../chroot/usr/lib/chromium
+if [ ! -d "$SRC" ]; then
+    echo "web module: no Chromium in the chroot, skipped"
+    exit 0
+fi
+
+STAGE=$(mktemp -d)
+trap 'rm -rf "$STAGE"' EXIT
+mkdir -p "$STAGE/usr/lib"
+cp -a "$SRC" "$STAGE/usr/lib/"
+# Same compression as the base image (live-build's default: mksquashfs's own)
+mksquashfs "$STAGE" live/web.squashfs -noappend -no-progress
+echo "web module: $(du -h live/web.squashfs | cut -f1)"

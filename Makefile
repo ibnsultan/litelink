@@ -11,7 +11,7 @@ SHELL_DST := $(BUILD)/config/includes.chroot/usr/lib/litelink/shell
 
 # Build-host packages (Debian 13)
 deps:
-	apt-get install -y live-build imagemagick grub-common fonts-inter
+	apt-get install -y live-build imagemagick grub-common fonts-inter squashfs-tools
 
 # Render boot art (Plymouth, GRUB, isolinux) from branding/ into build/config/
 branding:
@@ -25,7 +25,7 @@ shell:
 	find $(SHELL_DST) -name __pycache__ -prune -exec rm -rf {} +
 
 iso: branding shell
-	chmod +x $(BUILD)/auto/* $(BUILD)/config/hooks/normal/*.hook.chroot \
+	chmod +x $(BUILD)/auto/* $(BUILD)/config/hooks/normal/*.hook.chroot $(BUILD)/config/hooks/normal/*.hook.binary \
 		$(BUILD)/config/includes.chroot/usr/local/bin/* $(BUILD)/config/includes.chroot/usr/local/sbin/* \
 		$(SHELL_DST)/main.py
 	cd $(BUILD) && lb clean && lb config && lb build
@@ -37,6 +37,7 @@ sizes:
 	@echo "ISO:     $$(du -h $(ISO_SRC) | cut -f1)"
 	@echo "rootfs:  $$(du -sh --exclude=proc --exclude=sys --exclude=dev $(BUILD)/chroot 2>/dev/null | cut -f1)"
 	@echo "squash:  $$(du -h $(BUILD)/binary/live/filesystem.squashfs | cut -f1)"
+	@[ -e $(BUILD)/binary/live/web.squashfs ] && echo "web:     $$(du -h $(BUILD)/binary/live/web.squashfs | cut -f1) (module, installed with Web kiosk)" || true
 
 clean:
 	cd $(BUILD) && lb clean

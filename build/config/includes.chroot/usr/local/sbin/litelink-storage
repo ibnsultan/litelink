@@ -265,6 +265,8 @@ def cmd_usb_setup():
 
 MODES = ("standard", "kiosk")
 FEATURES = ("rdp", "vnc", "workspaces", "webkiosk")
+# Features installed as their own image module (in /live next to filesystem.squashfs)
+MODULES = {"webkiosk": "web.squashfs"}
 
 
 def parse_install_args(args):
@@ -345,11 +347,21 @@ def cmd_install(disk, opts=None):
     run("mkfs.ext4", "-F", "-q", "-L", SYS_LABEL, p2)
     run("mkfs.ext4", "-F", "-q", "-L", DATA_LABEL, p3)
 
-    # The OS image: kernel, initrd and the compressed root filesystem
+    # The OS image: kernel, initrd and the compressed root filesystem, plus the image
+    # modules for what was ticked in the installer (live-boot stacks every *.squashfs
+    # in /live). Web kiosk: the browser engine, web.squashfs. Not ticked: not copied,
+    # so the device carries no browser engine.
     src = os.path.join(MEDIUM, "live")
     files = [f for f in ("vmlinuz", "initrd.img", "filesystem.squashfs") if os.path.exists(os.path.join(src, f))]
     if len(files) != 3:
         raise RuntimeError("the LiteLink system files are incomplete")
+    for feature, module in MODULES.items():
+        if feature not in opts["features"]:
+            log(f"{module}: left out ({feature} not ticked)")
+        elif os.path.exists(os.path.join(src, module)):
+            files.append(module)
+        else:
+            raise RuntimeError(f"{feature} was ticked but {module} isn't on this USB stick")
     total = sum(os.path.getsize(os.path.join(src, f)) for f in files)
     done = 0
     with Mounted(p2, "ext4") as sysroot:

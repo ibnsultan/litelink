@@ -392,6 +392,8 @@ class Installer:
             count.set_text(f"{len(self.features)} of {len(PROTOCOLS)} selected")
         protos = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         for i, (key, title, sub, available) in enumerate(PROTOCOLS):
+            if key == "webkiosk" and not system.web_engine():
+                available = False          # this USB stick has no browser engine module
             chk = Gtk.CheckButton(active=key in self.features)
             last = i == len(PROTOCOLS) - 1
             if key == "rdp":       # required: ticked and locked (greyed tick, normal text)
