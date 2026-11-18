@@ -35,7 +35,7 @@ def field(label_text, widget, optional=False):
     head = Gtk.Box(spacing=6)
     head.pack_start(ui.label(label_text, "field-label"), False, False, 0)
     if optional:
-        head.pack_start(ui.label("optional", "optional"), False, False, 0)
+        head.pack_end(ui.label("optional", "optional"), False, False, 0)    # at the field's right edge
     box.pack_start(head, False, False, 0)
     box.pack_start(widget, False, False, 0)
     return box
@@ -259,11 +259,15 @@ class ConnectionDialog(Gtk.Box):
         stack.add_named(d, "display")
 
         # -- Devices
-        v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=20)
-        v.pack_start(ui.label("Choose what this device shares with the remote desktop.", "muted small"), False, False, 0)
+        v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, margin=20)
+        intro = ui.label("Choose what this device shares with the remote desktop.", "muted small")
+        intro.set_margin_bottom(6)
+        v.pack_start(intro, False, False, 0)
         self.dev_checks = {}
-        for key, title, hint in DEVICES:
-            row = ui.add_class(Gtk.Box(spacing=12), "device-row")
+        # A plain list: rows separated by a bottom border, none after the last
+        for i, (key, title, hint) in enumerate(DEVICES):
+            row = ui.add_class(Gtk.Box(spacing=12), "device-row",
+                               *(["device-row-sep"] if i < len(DEVICES) - 1 else []))
             col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
             col.pack_start(ui.label(title, "body strong"), False, False, 0)
             col.pack_start(ui.label(hint, "muted small"), False, False, 0)
@@ -450,8 +454,10 @@ class SettingsWindow(Gtk.Box):
         # a button swallows clicks meant for controls inside it (the `extra`
         # switch would only toggle the card). Here the switch gets its own
         # clicks and everything else opens / closes the card.
-        head = ui.add_class(Gtk.EventBox(), "acc-head")
+        head = ui.add_class(Gtk.EventBox(), "acc-head", *(["clickable"] if expandable else []))
         head.set_can_focus(expandable)
+        # Enter / leave: hover highlight and the pointer cursor (ui.install_pointer_cursors)
+        head.add_events(Gdk.EventMask.ENTER_NOTIFY_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
         row = Gtk.Box(spacing=14, margin_top=14, margin_bottom=14, margin_start=16, margin_end=16)
         chip = ui.add_class(Gtk.Box(), "ico-chip")
         chip.pack_start(ui.icon(icon_name, 20, "#2659B3" if expandable else "#8A8F98"), True, True, 0)
@@ -630,7 +636,9 @@ class SettingsWindow(Gtk.Box):
         col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, valign=Gtk.Align.CENTER)
         col.pack_start(ui.label(title, "body"), False, False, 0)
         if subtitle:
-            col.pack_start(ui.label(subtitle, "faint small"), False, False, 0)
+            sub = ui.label(subtitle, "faint small", wrap=True)
+            sub.set_max_width_chars(70)
+            col.pack_start(sub, False, False, 0)
         inner.pack_start(col, True, True, 0)
         if end is not None:
             inner.pack_start(end, False, False, 0)

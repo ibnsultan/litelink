@@ -213,14 +213,53 @@ def make_draggable(panel, handle, on_double=None):
         st["drag"] = False
         return False
 
-    def realize(w):
-        if w.get_window():
-            w.get_window().set_cursor(Gdk.Cursor.new_from_name(w.get_display(), "grab"))
-
+    # No hand cursor on the drag area: title bars keep the arrow, like native ones
     handle.connect("button-press-event", press)
     handle.connect("motion-notify-event", motion)
     handle.connect("button-release-event", release)
-    handle.connect("realize", realize)
+
+
+# ---------------------------------------------------------------- pointer cursor
+# GTK 3 has no CSS `cursor`, so clickable widgets would show the arrow. One hook
+# for the whole shell gives every button, switch, list and `clickable`-classed
+# widget the pointing-hand cursor while it's enabled.
+CLICKABLE = (Gtk.Button, Gtk.Switch, Gtk.ListBox)
+_pointer = {}
+
+
+def _is_clickable(w):
+    return isinstance(w, CLICKABLE) or w.get_style_context().has_class("clickable")
+
+
+def _cursor_for(w):
+    if w.is_sensitive():
+        if "c" not in _pointer:
+            _pointer["c"] = Gdk.Cursor.new_from_name(w.get_display(), "pointer")
+        return _pointer["c"]
+    return None
+
+
+def _on_enter(w, ev, *_):
+    if _is_clickable(w) and ev.window is not None:
+        if getattr(w, "_ll_cursor_win", None) is None:
+            # First hover: follow enabled / disabled from now on (a per-widget
+            # handler; a global state hook would also fire while widgets are
+            # being constructed, which crashes PyGObject, e.g. Gtk.RadioButton()).
+            w.connect("state-flags-changed", _on_state)
+        w._ll_cursor_win = ev.window        # the widget's own input window
+        ev.window.set_cursor(_cursor_for(w))
+    return True                             # keep the hook
+
+
+def _on_state(w, *_):
+    # Disabled while hovered (or enabled again): update the cursor right away
+    win = getattr(w, "_ll_cursor_win", None)
+    if win is not None and not win.is_destroyed():
+        win.set_cursor(_cursor_for(w))
+
+
+def install_pointer_cursors():
+    GObject.add_emission_hook(Gtk.Widget, "enter-notify-event", _on_enter)
 
 
 class Dropdown(Gtk.MenuButton):

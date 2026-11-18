@@ -172,7 +172,8 @@ switch:checked { background-color: #2F6FD6; }
 .tab label { font-size: 14px; font-weight: 500; color: #5A606B; }
 .tab.active { border-bottom-color: #2F6FD6; }
 .tab.active label { color: #2659B3; font-weight: 600; }
-.device-row { border: 1px solid #ECEEF2; border-radius: 10px; padding: 12px 14px; }
+.device-row { padding: 12px 4px; }
+.device-row-sep { border-bottom: 1px solid #ECEEF2; }
 .settings-nav { background-color: #F6F7F9; border-right: 1px solid #ECEEF2; padding: 10px; border-radius: 0 0 0 16px; }
 .nav-btn { border: none; background: transparent; box-shadow: none; border-radius: 8px; padding: 0 10px; min-height: 38px; }
 .nav-btn:hover { background: #E9EDF3; }

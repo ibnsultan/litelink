@@ -1,6 +1,6 @@
 """Settings > Install (live USB) / Storage (installed): persistent settings on the USB stick, and the
 LiteLink installer (choose disk -> confirm erase -> progress -> restart)."""
-from gi.repository import GLib, Gtk
+from gi.repository import Gdk, GLib, Gtk
 
 from . import system, ui
 
@@ -433,14 +433,22 @@ class Installer:
                 col.pack_start(ui.label(" · ".join(x for x in (d.get("model"), d["path"]) if x), "muted small"),
                                False, False, 0)
                 inner.pack_start(col, True, True, 0)
-                rb.add(inner)
+                # The radio sits at the right end (icon left, choice right); the
+                # whole row picks the disk
+                rb.set_valign(Gtk.Align.CENTER)
+                inner.pack_end(rb, False, False, 0)
                 rb.connect("toggled", lambda r, d=d: r.get_active() and setattr(self, "disk", d))
                 if d["path"] == keep:
                     rb.set_active(True)
+                hit = ui.add_class(Gtk.EventBox(visible_window=False), "clickable")
+                hit.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK
+                               | Gdk.EventMask.ENTER_NOTIFY_MASK)
+                hit.connect("button-release-event", lambda _w, e, r=rb: (e.button == 1 and r.set_active(True), False)[1])
+                hit.add(inner)
                 row = ui.add_class(Gtk.Box(), "wizard-disk")
                 if d is not disks[-1]:
                     ui.add_class(row, "wizard-disk-sep")
-                row.pack_start(rb, True, True, 0)
+                row.pack_start(hit, True, True, 0)
                 group.pack_start(row, False, False, 0)
             if not keep or keep not in [d["path"] for d in disks]:
                 self.disk = disks[0]

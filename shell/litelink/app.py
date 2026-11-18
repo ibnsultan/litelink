@@ -541,6 +541,7 @@ def main():
     css.load_from_path(os.path.join(here, "theme.css"))
     Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), css,
                                              Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    ui.install_pointer_cursors()
     win = Shell()
     screen = Gdk.Screen.get_default()
     win.set_default_size(screen.get_width(), screen.get_height())
