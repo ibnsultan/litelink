@@ -507,6 +507,12 @@ def _vpn(args, payload=None, timeout=40):
     return r.returncode == 0, r.stdout.strip(), err[6:] if err.startswith("ERROR ") else err
 
 
+def vpn_active():
+    """Names of the WireGuard tunnels that are up (cheap: no sudo, for polling)."""
+    rc, out = run(["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show", "--active"])
+    return [l.rsplit(":", 1)[0].replace("\\:", ":") for l in out.splitlines() if l.endswith(":wireguard")]
+
+
 def vpn_list():
     import json
     ok, out, _ = _vpn(["list"], timeout=15)
@@ -689,6 +695,14 @@ def bt_pair(mac):
     _btctl("trust", mac)
     _btctl("--timeout", "10", "connect", mac, timeout=15)
     return True, "Paired"
+
+
+def bt_connected():
+    """Names of connected Bluetooth devices ([] without an adapter, never blocking on one)."""
+    ad = bt_adapter()
+    if not ad["powered"]:
+        return []
+    return [name for _mac, name in _devices("Connected")]
 
 
 def bt_connect(mac, on=True):

@@ -171,18 +171,45 @@ class Shell(Gtk.Window):
             (ctx.add_class if n == name else ctx.remove_class)("active")
 
     def _build_clock(self):
+        outer = Gtk.Box(spacing=8, halign=Gtk.Align.END, valign=Gtk.Align.START,
+                        margin_top=20, margin_end=24)
+        # Status indicators left of the date: VPN and Bluetooth, only while connected
+        self.status_icons = {}
+        for key in ("vpn", "bluetooth"):
+            dot = ui.add_class(Gtk.Box(), "status-dot")
+            ico = ui.icon(key, 16, "#FFFFFF", 1.9)
+            ico.show()                 # the dot itself stays out of show_all until it's needed
+            dot.pack_start(ico, True, True, 0)
+            dot.set_no_show_all(True)
+            outer.pack_start(dot, False, False, 0)
+            self.status_icons[key] = dot
         box = ui.add_class(Gtk.Box(spacing=10), "clock-pill")
-        box.set_halign(Gtk.Align.END)
-        box.set_valign(Gtk.Align.START)
-        box.set_margin_top(20)
-        box.set_margin_end(24)
         self.clock_date = Gtk.Label()
         self.clock_time = ui.label("", "strong")
         box.pack_start(self.clock_date, False, False, 0)
         box.pack_start(Gtk.Label(label="·"), False, False, 0)
         box.pack_start(self.clock_time, False, False, 0)
+        outer.pack_start(box, False, False, 0)
         self._tick_clock()
-        return box
+        self._status_busy = False
+        self._poll_status()
+        GLib.timeout_add_seconds(10, self._poll_status)
+        return outer
+
+    def _poll_status(self):
+        if not self._status_busy:
+            self._status_busy = True
+
+            system.in_background(lambda: (system.vpn_active(), system.bt_connected()), self._show_status)
+        return True
+
+    def _show_status(self, res):
+        self._status_busy = False
+        vpn, bt = res
+        for key, names, what in (("vpn", vpn, "VPN connected"), ("bluetooth", bt, "Bluetooth connected")):
+            dot = self.status_icons[key]
+            dot.set_tooltip_text(f"{what}: {', '.join(names)}" if names else None)
+            dot.set_visible(bool(names))
 
     def _tick_clock(self):
         from .config import fmt_date, fmt_time

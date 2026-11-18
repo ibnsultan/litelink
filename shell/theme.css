@@ -29,6 +29,7 @@ label { color: #16171A; }
 .clock-pill { background-color: rgba(255, 255, 255, 0.18); border-radius: 999px; padding: 8px 14px; }
 .clock-pill label { color: #FFFFFF; font-size: 14px; font-weight: 500; }
 .clock-pill .strong { font-weight: 600; }
+.status-dot { background-color: rgba(255, 255, 255, 0.18); border-radius: 999px; min-width: 36px; min-height: 36px; }
 .desk-icon {
   border-radius: 10px; border: none; background: transparent; box-shadow: none;
   padding: 10px 6px 8px;
