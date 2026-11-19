@@ -1,6 +1,6 @@
 """Dock flyouts. Each builder returns (card widget, bottom margin in px) so the
 card lines up with its dock button."""
-from gi.repository import GLib, Gtk
+from gi.repository import Gdk, GLib, Gtk
 
 from . import system as sysinfo, ui, wifi
 
@@ -19,6 +19,17 @@ def _card(width):
     card = ui.add_class(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12), "card", "flyout")
     card.set_size_request(width, -1)
     return card
+
+
+def _fit(widget, room):
+    """widget in a scroll area that grows with it up to the screen's height less room
+    (px taken by the card's margins and header), then scrolls: short screens, seats."""
+    sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
+                            vscrollbar_policy=Gtk.PolicyType.AUTOMATIC)
+    sw.set_propagate_natural_height(True)
+    sw.set_max_content_height(max(160, Gdk.Screen.get_default().get_height() - room))
+    sw.add(widget)
+    return sw
 
 
 def _link(text, cb):
@@ -285,5 +296,6 @@ def settings(app):
     add.add(row)
     add.connect("clicked", lambda *_: app.edit_connection(None))
     body.pack_start(add, False, False, 0)
-    card.pack_start(body, False, False, 0)
+    # 14 px above the card, 40 below it (shadow room), ~50 for the header
+    card.pack_start(_fit(body, 14 + 40 + 50), False, False, 0)
     return card, -14          # negative = anchored to the top (opened from the kite button)

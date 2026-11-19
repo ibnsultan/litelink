@@ -455,14 +455,27 @@ class ConnectionDialog(Gtk.Box):
 
 
 class SettingsWindow(Gtk.Box):
+    NAV_WIDE, NAV_RAIL = 236, 58      # nav width with names / icons only
+    NARROW = 900                      # below this window width the nav starts as icons only
+                                      # (with names, pages like Network need ~800 px)
+
     def __init__(self, app, panel="network"):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         ui.add_class(self, "dialog")
-        self.set_size_request(960, 616)
+        # 960 x 660 (the whole nav fits), or the screen less a margin when it's smaller
+        # (small monitors, seats); the nav and the page scroll then
+        scr = Gdk.Screen.get_default()
+        self.normal_size = (min(960, scr.get_width() - 32), min(660, scr.get_height() - 32))
+        self.set_size_request(*self.normal_size)
         self.app = app
+        self.nav_choice = None        # the user's own choice (collapsed or not), once made
 
-        head = Gtk.Box(spacing=10, margin_start=18, margin_end=12)
+        head = Gtk.Box(spacing=10, margin_start=10, margin_end=12)
         head.set_size_request(-1, 52)
+        self.nav_btn = ui.add_class(Gtk.Button(valign=Gtk.Align.CENTER), "icon-btn")
+        self.nav_btn.add(ui.icon("sidebar", 18, "#5A606B", 2))
+        self.nav_btn.connect("clicked", lambda *_: self._toggle_nav())
+        head.pack_start(self.nav_btn, False, False, 0)
         head.pack_start(ui.picture("icon.png", 24), False, False, 0)
         head.pack_start(ui.label("Settings", "strong body"), True, True, 0)
         self.max_btn = ui.add_class(Gtk.Button(valign=Gtk.Align.CENTER), "icon-btn")
@@ -483,33 +496,81 @@ class SettingsWindow(Gtk.Box):
         self.pack_start(Gtk.Separator(), False, False, 0)
 
         body = Gtk.Box()
-        nav = ui.add_class(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2), "settings-nav")
-        nav.set_size_request(236, -1)
-        self.nav_buttons = {}
-        for title, items in SETTINGS_GROUPS:
+        # The nav: names and group titles, or (collapsed) a rail of icons with the names as
+        # tooltips. It scrolls when the window is shorter than the list.
+        self.nav = ui.add_class(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2), "settings-nav")
+        self.nav_buttons, self.nav_names, self.nav_titles, self.nav_seps = {}, [], [], []
+        for gi, (title, items) in enumerate(SETTINGS_GROUPS):
             g = ui.label(title.upper(), "group-title")
             g.set_margin_start(10)
             g.set_margin_top(12)
             g.set_margin_bottom(6)
-            nav.pack_start(g, False, False, 0)
+            self.nav.pack_start(g, False, False, 0)
+            self.nav_titles.append(g)
+            if gi:                                   # between groups when collapsed
+                sep = Gtk.Separator(margin_top=8, margin_bottom=8, margin_start=8, margin_end=8)
+                sep.set_no_show_all(True)
+                self.nav.pack_start(sep, False, False, 0)
+                self.nav_seps.append(sep)
             for key, text, icon_name in items:
                 b = ui.add_class(Gtk.Button(), "nav-btn")
                 row = Gtk.Box(spacing=10)
                 row.pack_start(ui.icon(icon_name, 18, "#2B2E34"), False, False, 0)
-                row.pack_start(ui.label(text), False, False, 0)
+                name = ui.label(text)
+                row.pack_start(name, False, False, 0)
+                self.nav_names.append(name)
                 b.add(row)
                 b.connect("clicked", lambda _b, k=key: self.show(k))
                 if key not in READY_PANELS:
                     b.set_sensitive(False)
                     b.set_tooltip_text("Coming in a later build")
+                b.nav_name = text
                 self.nav_buttons[key] = b
-                nav.pack_start(b, False, False, 0)
-        body.pack_start(nav, False, False, 0)
+                self.nav.pack_start(b, False, False, 0)
+        self.nav_scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                             vscrollbar_policy=Gtk.PolicyType.AUTOMATIC)
+        self.nav_scroll.add(self.nav)
+        body.pack_start(self.nav_scroll, False, False, 0)
+        self.collapsed = None
+        self._set_nav(self.normal_size[0] < self.NARROW)
 
         self.content = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
         body.pack_start(self.content, True, True, 0)
         self.pack_start(body, True, True, 0)
+        self.connect("size-allocate", self._on_size)
         self.show(panel if panel in READY_PANELS else "network")
+
+    # -- the nav: names or icons only ---------------------------------------
+    def _set_nav(self, collapsed):
+        if collapsed == self.collapsed:
+            return
+        self.collapsed = collapsed
+        self.nav_scroll.set_size_request(self.NAV_RAIL if collapsed else self.NAV_WIDE, -1)
+        ctx = self.nav.get_style_context()
+        if collapsed:
+            ctx.add_class("collapsed")
+        else:
+            ctx.remove_class("collapsed")
+        for w in self.nav_names + self.nav_titles:
+            w.set_no_show_all(collapsed)
+            w.set_visible(not collapsed)
+        for s in self.nav_seps:
+            s.set_visible(collapsed)
+        for b in self.nav_buttons.values():
+            if b.get_sensitive():
+                b.set_tooltip_text(b.nav_name if collapsed else None)
+        self.nav_btn.set_tooltip_text("Show names" if collapsed else "Icons only")
+
+    def _toggle_nav(self):
+        self.nav_choice = not self.collapsed
+        self._set_nav(self.nav_choice)
+
+    def _on_size(self, _w, alloc):
+        # Follow the window's width until the user picks, e.g. when maximizing on a small screen
+        if self.nav_choice is None:
+            want = alloc.width < self.NARROW
+            if want != self.collapsed:
+                GLib.idle_add(lambda: (self._set_nav(want), False)[1])
 
     def toggle_maximize(self):
         """Fill the screen beside the dock, or go back to the centred window."""
@@ -523,7 +584,7 @@ class SettingsWindow(Gtk.Box):
             self.set_margin_end(16)
             self.set_margin_bottom(16)
         else:
-            self.set_size_request(960, 616)
+            self.set_size_request(*self.normal_size)
             self.set_halign(Gtk.Align.CENTER)
             self.set_valign(Gtk.Align.CENTER)
             for m in (self.set_margin_start, self.set_margin_top, self.set_margin_end, self.set_margin_bottom):

@@ -181,6 +181,8 @@ switch:checked { background-color: #2F6FD6; }
 .device-row-sep { border-bottom: 1px solid #ECEEF2; }
 .settings-nav { background-color: #F6F7F9; border-right: 1px solid #ECEEF2; padding: 10px; border-radius: 0 0 0 16px; }
 .nav-btn { border: none; background: transparent; box-shadow: none; border-radius: 8px; padding: 0 10px; min-height: 38px; }
+.settings-nav.collapsed { padding: 10px 7px; }
+.settings-nav.collapsed .nav-btn { padding: 0 11px; }   /* icon centred in the rail */
 .nav-btn:hover { background: #E9EDF3; }
 .nav-btn label { font-size: 14px; font-weight: 500; color: #2B2E34; }
 .nav-btn.active { background: #E7EFFB; }
