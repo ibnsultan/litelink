@@ -34,5 +34,6 @@ __pycache__/
 assets/
 tools/
 
+docs/
 docs/sizes.md
 docs/scratchpad.md
