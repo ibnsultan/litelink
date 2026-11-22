@@ -29,9 +29,15 @@ DEFAULT_CONNECTION = {
     "ignore_cert": False,    # set when the user chose "remember this certificate"
     "display": {"resolution": "fullscreen", "depth": 32, "multimon": False, "dynamic": True},
     "devices": {"clipboard": True, "audio": True, "microphone": False, "usb": False, "smartcard": False},
-    # Web kiosk (Chromium): host is the address. A LiteOS instance is recognised by
-    # itself (its <meta name="application-name" content="LiteOS">), not set here.
-    "web": {"allowed": "",          # Web kiosk: other sites it may open (empty = any)
+    # Web kiosk (Chromium): host is the address (scheme, host, path; the port is
+    # web.port). "This is LiteOS" (web.liteos) is the admin's choice: the form ticks
+    # it by itself when the address answers with <meta name="application-name"
+    # content="LiteOS">, and only a ticked connection gets the LiteOS extras.
+    "web": {"port": "",             # empty = the scheme's own (443 for https, 80 for http)
+            "liteos": None,         # True / False; None = not decided yet (treated as not LiteOS)
+            "usb": "read",          # LiteOS sessions: USB drives for window.LiteLink (off / read / write)
+            "printers": True,       # LiteOS sessions: printing to Settings › Printers (window.LiteLink, Chromium)
+            "allowed": "",          # Web kiosk: other sites it may open (empty = any)
             "idle_minutes": 0,      # clear the session and go home after this long unused (0 = never)
             "keep_signins": False},  # keep cookies between sessions (off: a fresh profile each time)
 }
@@ -165,6 +171,17 @@ def has_credentials(conn):
     if conn.get("protocol") in WEB_PROTOCOLS:
         return True
     return bool(conn.get("username")) and bool(conn.get("password"))
+
+
+def address_label(conn):
+    """The address as people read it: a Web kiosk's host with its port, if it has one."""
+    host = (conn.get("host") or "").strip()
+    port = str(conn.get("web", {}).get("port") or "").strip()
+    if conn.get("protocol") not in WEB_PROTOCOLS or not port:
+        return host
+    scheme, sep, rest = host.partition("://") if "://" in host else ("", "", host)
+    name, slash, path = rest.partition("/")
+    return f"{scheme}{sep}{name}:{port}{slash}{path}"
 
 
 def normalize(conn):

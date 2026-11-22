@@ -16,7 +16,7 @@ gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 from . import system, ui  # noqa: E402
-from .config import WEB_PROTOCOLS, Config, has_credentials  # noqa: E402
+from .config import WEB_PROTOCOLS, Config, address_label, has_credentials  # noqa: E402
 
 # Sky wallpaper: (offset, colour) stops and soft cloud ellipses (cx, cy, rx, ry, alpha)
 SKY = [(0.0, "#1E4E9C"), (0.38, "#3D7ACC"), (0.72, "#8DB9EA"), (1.0, "#D6E7F8")]
@@ -234,7 +234,7 @@ class Shell(Gtk.Window):
     def _desk_icon(self, conn):
         b = ui.add_class(Gtk.Button(), "desk-icon")
         b.set_size_request(108, -1)
-        b.set_tooltip_text(conn["host"])
+        b.set_tooltip_text(address_label(conn))
         v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         ov = Gtk.Overlay(halign=Gtk.Align.CENTER)
         tile = ui.add_class(Gtk.Box(), "icon-tile")
@@ -436,18 +436,101 @@ class Shell(Gtk.Window):
             GLib.timeout_add(100, lambda: (self.kiosk is not None and not self.session and not self.layers
                                            and self.kiosk_home(), False)[1])
 
-    def open_settings(self, panel="network", unlocked=False):
+    def open_settings(self, panel="network", unlocked=False, on_close=None):
         """Settings. Behind the admin password when it's set and either the
         device is a kiosk (the kiosk screen asks) or Admin lock says so."""
         self.close_flyout()
         if (not unlocked and self.kiosk is None and self.cfg.data.get("settings_locked")
                 and self.cfg.lock_needs_password()):
             from .dialogs import admin_password_dialog
-            admin_password_dialog(self, lambda: self.open_settings(panel, unlocked=True))
+            admin_password_dialog(self, lambda: self.open_settings(panel, unlocked=True, on_close=on_close),
+                                  on_cancel=on_close)
             return
         from .dialogs import SettingsWindow
-        # Closing Settings applies a mode change (Settings › System)
-        self.push_layer(SettingsWindow(self, panel), "clear", on_close=self.apply_mode)
+
+        def closed():
+            self.apply_mode()             # closing Settings applies a mode change (Settings › System)
+            if on_close:
+                on_close()
+        # over a web session the "Connecting" screen is behind it: dim it (the light scrim:
+        # the dark one recolours labels for its own screens)
+        self.push_layer(SettingsWindow(self, panel), "light" if self.session else "clear", on_close=closed)
+
+    # ================================================================ over a LiteOS session
+    # LiteOS (through the device bridge, bridge.py) can ask for LiteLink's own screens:
+    # the admin password, the lock screen, Settings, the display check. During a web
+    # session Chromium covers this window, so it's raised above Chromium while one
+    # of them is open and lowered again afterwards.
+    def over_session(self, on):
+        if self.session is None:
+            self._over = 0
+            return
+        self._over = max(0, getattr(self, "_over", 0) + (1 if on else -1))
+        if on and self._over == 1:
+            self.show()
+            self.set_keep_above(True)
+            self.present()
+        elif not on and self._over == 0:
+            # Openbox doesn't put a raised window back under Chromium's full-screen one
+            # when asked to lower it, so it's hidden until the session ends
+            self.set_keep_above(False)
+            self.hide()
+            self._hidden_for_session = True
+            if getattr(self, "floatbar", None) is not None:
+                self.floatbar._raise()
+
+    def admin_needed(self):
+        """The admin password is asked when one is set and the device is a kiosk,
+        or Admin lock asks for it in Standard mode too (as for Settings)."""
+        return self.cfg.lock_needs_password() and (self.kiosk is not None or bool(self.cfg.data.get("settings_locked")))
+
+    def admin_for_session(self, why, done):
+        """LiteOS asked for something that changes the device: LiteLink asks for the
+        admin password itself, over the session. done(True | False)."""
+        if not self.admin_needed():
+            done(True)
+            return
+        from .dialogs import admin_password_dialog
+        self.over_session(True)
+        answered = {"done": False}
+
+        def finish(ok):
+            if answered["done"]:
+                return
+            answered["done"] = True
+            self.over_session(False)
+            done(ok)
+        admin_password_dialog(self, lambda: finish(True), on_cancel=lambda: finish(False),
+                              message=f"LiteOS asks to {why[:1].lower() + why[1:]}." if why else None,
+                              ok_label="Allow")
+
+    def settings_for_session(self, page):
+        """LiteOS opens LiteLink's Settings (behind the admin password as usual)."""
+        def show():
+            self.over_session(True)
+            self.open_settings(page, unlocked=True, on_close=lambda: self.over_session(False))
+        if self.admin_needed():
+            self.admin_for_session("open LiteLink Settings", lambda ok: ok and show())
+        else:
+            show()
+
+    def display_for_session(self, output, mode, done):
+        """LiteOS changes a screen's resolution: applied, then LiteLink's own
+        "Keep these display settings?" (anything but Keep goes back). done(ok, kept)."""
+        d = next((x for x in system.displays() if x["output"] == output), None)
+        if d is None or mode not in d["modes"]:
+            done(False, False)
+            return
+        if mode == d["current"]:
+            done(True, True)
+            return
+        if not system.set_mode(output, mode):
+            done(False, False)
+            return
+        from .dialogs import confirm_display
+        self.over_session(True)
+        confirm_display(self, output, d["current"], mode,
+                        on_done=lambda kept: (self.over_session(False), done(True, kept)))
 
     # ================================================================ modes
     def apply_mode(self):
@@ -492,14 +575,18 @@ class Shell(Gtk.Window):
         self.push_layer(power_menu(self), "dark", on_close=lambda: self._set_active(None))
 
     def lock(self):
+        over = getattr(self, "_over", 0)
         self.clear_layers()
+        self._over = 0 if self.session is None else over
         from .screens import lock_screen
         self.lock_clock = None
+        self.over_session(True)           # over a web session: above Chromium until unlocked
         self.push_layer(lock_screen(self), "lock", closable=False, center=False)
 
     def unlock(self, entry):
         self.lock_clock = None
         self.pop_layer(entry)
+        self.over_session(False)
 
     def start_session(self, conn, password=None, username=None, domain=None, ignore_cert=False):
         self.close_flyout()
@@ -554,7 +641,7 @@ class Shell(Gtk.Window):
                     return
                 try:
                     self.session = web.Session(conn, lambda *a: self._session_ended(conn, layer, *a),
-                                               url=res["url"], liteos=res["liteos"])
+                                               url=res["url"], liteos=res["liteos"], final=res.get("final"), app=self)
                 except OSError as e:
                     self.pop_layer(layer)
                     self.push_layer(screens.error(self, conn, "unreachable", 255, str(e)), "dark")
@@ -605,7 +692,18 @@ class Shell(Gtk.Window):
     def _session_ended(self, conn, layer, kind, code, text, seconds):
         from . import screens
         cancelled = self.session is not None and self.session.cancelled
+        if self.session is not None and getattr(self.session, "requests", None) is not None:
+            self.session.requests.close()
+        self._over = 0
+        self.set_keep_above(False)
+        if getattr(self, "_hidden_for_session", False):     # hidden after one of LiteLink's screens closed
+            self._hidden_for_session = False
+            self.show()
+            self.present()
         self.session = None
+        # LiteOS may have changed the keyboard layout for its session: back to the saved one
+        if conn.get("protocol") in WEB_PROTOCOLS:
+            system.in_background(lambda: system.apply_input(self.cfg.data.get("input") or {}), lambda _r: None)
         if getattr(self, "floatbar", None) is not None:
             self.floatbar.close()
             self.floatbar = None

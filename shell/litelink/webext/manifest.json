@@ -1,10 +1,30 @@
 {
   "manifest_version": 3,
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAw8f4Hn2fw7GG4Yj+U6ggD7M77OT2V59VsgN4KtxN2wvYe2DmZXFCu5KRlZRvuFMdcAgORqSUnBfB/owC+Q6hxH8K5mBE/4MLeQKJ64yFVI0G1E2KWrJF9K9kOn1udx5CJIjG7FcfumRNjQQlvf3gYAoLbq7+GtERkJqgrG2m1DimL0xRZ/vybPzv6JzoA+NjlnBAS4xBVBt8Px9tnYPGz8cM8UHOsLX3+JXNzXPwLngBhUZe6wlvnti9gf4FuFkOj9dTQJr+NzkCPnSVBTlk7kXLAoJ1XTsfEEaI1OKbKB4uZ9ckEsQqXMvLVLUGAJuItsIt8XPRwoBNWB6SQiERSQIDAQAB",
   "name": "LiteLink Kiosk",
-  "version": "1.0.0",
-  "description": "LiteLink web session rules: allowed sites and the reset after a period of no use.",
-  "permissions": ["declarativeNetRequest", "idle", "browsingData", "tabs"],
-  "host_permissions": ["<all_urls>"],
-  "background": { "service_worker": "background.js" },
-  "web_accessible_resources": [{ "resources": ["blocked.html"], "matches": ["<all_urls>"] }]
+  "version": "1.3.0",
+  "description": "LiteLink web session rules (allowed sites, reset after a period of no use) and, in LiteOS sessions, window.LiteLink.",
+  "permissions": [
+    "declarativeNetRequest",
+    "idle",
+    "browsingData",
+    "tabs",
+    "nativeMessaging"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "blocked.html"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ]
 }

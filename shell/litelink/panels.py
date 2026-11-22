@@ -8,6 +8,7 @@ import time
 from gi.repository import GLib, Gtk
 
 from . import system, ui
+from .config import address_label
 
 
 def _section(page, title):
@@ -263,7 +264,7 @@ def connections(win, page):
             ui.add_class(row, "device-row-sep")
         col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3, valign=Gtk.Align.CENTER)
         col.pack_start(ui.label(c["name"] or c["host"], "strong body"), False, False, 0)
-        bits = [PROTOCOL_NAMES.get(c["protocol"], c["protocol"].upper()), c["host"]]
+        bits = [PROTOCOL_NAMES.get(c["protocol"], c["protocol"].upper()), address_label(c)]
         if kiosk and kiosk["id"] == c["id"]:
             bits.append("Kiosk")
         elif c.get("auto"):
@@ -326,7 +327,8 @@ def _conn_target(c):
     host = (c.get("host") or "").strip()
     if c.get("protocol") == "web":
         u = urlsplit(host if "://" in host else "https://" + host)
-        return u.hostname or host, u.port or (80 if u.scheme == "http" else 443)
+        port = str(c.get("web", {}).get("port") or "")
+        return u.hostname or host, int(port) if port.isdigit() else (u.port or (80 if u.scheme == "http" else 443))
     if c.get("gateway"):
         g = c["gateway"].strip()
         h, _, p = g.rpartition(":") if g.count(":") == 1 else (g, "", "")

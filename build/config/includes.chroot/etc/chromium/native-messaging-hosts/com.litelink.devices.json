@@ -1,0 +1,7 @@
+{
+  "name": "com.litelink.devices",
+  "description": "LiteLink device bridge for LiteOS sessions (window.LiteLink)",
+  "path": "/usr/local/bin/litelink-devices",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://jihpngncfocklomfbmnodegojphnjaga/"]
+}

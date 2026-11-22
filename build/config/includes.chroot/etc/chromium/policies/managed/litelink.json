@@ -8,7 +8,6 @@
   "PasswordManagerEnabled": false,
   "AutofillAddressEnabled": false,
   "AutofillCreditCardEnabled": false,
-  "PrintingEnabled": false,
   "DownloadRestrictions": 3,
   "DefaultBrowserSettingEnabled": false,
   "MetricsReportingEnabled": false,
@@ -17,6 +16,9 @@
   "BackgroundModeEnabled": false,
   "HardwareAccelerationModeEnabled": true,
   "BlockThirdPartyCookies": false,
+  "NativeMessagingBlocklist": ["*"],
+  "NativeMessagingAllowlist": ["com.litelink.devices"],
+  "NativeMessagingUserLevelHosts": false,
   "URLBlocklist": ["chrome://*", "file://*", "view-source:*"],
-  "URLAllowlist": ["chrome://newtab", "chrome-extension://*"]
+  "URLAllowlist": ["chrome://newtab", "chrome://print", "chrome-extension://*"]
 }

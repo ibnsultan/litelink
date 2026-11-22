@@ -466,10 +466,22 @@ def media_list():
         return []
 
 
-def media_mount(dev):
-    """Mount read-only; -> mount point or None."""
-    rc, out = run([MEDIA, "mount", dev], timeout=20, sudo=True)
+def media_mount(dev, rw=False):
+    """Mount read-only (writable with rw: a LiteOS session writing to it; an
+    existing read-only mount is switched); -> mount point or None."""
+    rc, out = run([MEDIA, "mount", dev] + (["--rw"] if rw else []), timeout=20, sudo=True)
     return out if rc == 0 and out else None
+
+
+def media_readonly(dev):
+    """Switch a writable mount back to read-only (writing done)."""
+    run([MEDIA, "mount", dev, "--ro"], timeout=30, sudo=True)
+
+
+def media_eject(dev):
+    """Write everything out and unmount; False while it's still in use."""
+    rc, _ = run([MEDIA, "eject", dev], timeout=60, sudo=True)
+    return rc == 0
 
 
 def media_unmount(dev=None):

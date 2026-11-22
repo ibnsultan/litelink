@@ -4,6 +4,7 @@ import time
 from gi.repository import GLib, Gtk
 
 from . import system, ui
+from .config import address_label
 
 # Severity colours: blue (low) → amber → orange → red (high)
 SEVERITY = {"blue": "#2F6FD6", "amber": "#F5A524", "orange": "#E8710A", "red": "#E5484D"}
@@ -197,7 +198,7 @@ def connecting(app, conn):
     col.pack_start(anim, False, False, 0)
     col.pack_start(_center(f"Connecting to {conn['name']}", "h1"), False, False, 0)
     kind = {"web": "Web kiosk"}.get(conn.get("protocol"), "Remote Desktop")
-    col.pack_start(_center(f"{conn['host']} · {kind}", "sub"), False, False, 0)
+    col.pack_start(_center(f"{address_label(conn)} · {kind}", "sub"), False, False, 0)
     cancel = ui.button("Cancel", "btn pill btn-ghost", app.cancel_session)
     cancel.set_halign(Gtk.Align.CENTER)
     cancel.set_margin_top(22)

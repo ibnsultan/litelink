@@ -2,7 +2,10 @@
 """LiteLink OS: access to USB drives (run as root via sudo by the shell).
 
   litelink-media list             JSON: USB drive partitions LiteLink can read
-  litelink-media mount DEV        mount DEV read-only, print the mount point
+  litelink-media mount DEV [--rw|--ro]  mount DEV read-only (or writable), print the mount point;
+                                  an existing mount is switched to writable (--rw) or back (--ro)
+  litelink-media eject DEV        write everything out and unmount DEV, refusing (exit 3)
+                                  while it's in use, so "safe to pull out" is true
   litelink-media unmount [DEV]    unmount DEV (or every drive mounted here)
   litelink-media save DEV NAME    write stdin to the file NAME on DEV (Diagnostics report)
 
@@ -69,15 +72,34 @@ def target(dev):
     return os.path.join(ROOT, re.sub(r"[^A-Za-z0-9_-]", "_", os.path.basename(dev)))
 
 
-def cmd_mount(dev):
+def mount_options(fstype, rw):
+    opts = f"{'rw' if rw else 'ro'},nosuid,nodev,noexec,uid={USER_UID},gid={USER_GID},umask=022"
+    if rw and fstype == "vfat":
+        opts += ",flush"            # FAT: write data out promptly, so a stick pulled out loses little
+    return opts
+
+
+def cmd_mount(dev, rw=False, ro=False):
+    """Read-only by default; --rw for a LiteOS session allowed to write, only
+    while it writes ("USB drives: Read and write"); --ro switches it back once
+    the writing is done (a FAT drive is marked in use while mounted writable).
+    Still nosuid,nodev,noexec, owned by the litelink user."""
     d = next((x for x in drives() if x["path"] == dev), None)
     if not d:
         raise RuntimeError("not a readable USB drive")
     if d["mountpoint"]:
-        return d["mountpoint"]
+        mp = d["mountpoint"]
+        readonly = bool(os.statvfs(mp).f_flag & os.ST_RDONLY)
+        if (rw and readonly) or (ro and not readonly):
+            subprocess.run(["sync"])
+            r = subprocess.run(["mount", "-o", "remount," + mount_options(d["fstype"], rw), mp],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                raise RuntimeError((r.stderr or "remount failed").strip()[:200])
+        return mp
     mp = target(dev)
     os.makedirs(mp, mode=0o755, exist_ok=True)
-    opts = f"ro,nosuid,nodev,noexec,uid={USER_UID},gid={USER_GID},umask=022"
+    opts = mount_options(d["fstype"], rw)
     r = subprocess.run(["mount", "-t", DRIVERS[d["fstype"]], "-o", opts, dev, mp],
                        capture_output=True, text=True)
     if r.returncode != 0:
@@ -93,14 +115,34 @@ def cmd_unmount(dev=None):
     if not os.path.isdir(ROOT):
         return
     targets = [target(dev)] if dev else [os.path.join(ROOT, n) for n in os.listdir(ROOT)]
+    subprocess.run(["sync"])
     for mp in targets:
         if os.path.ismount(mp):
-            # lazy: also releases a drive that was already pulled out
-            subprocess.run(["umount", "-l", mp], capture_output=True)
+            # a plain unmount writes everything out first (safe to pull the drive out);
+            # lazy only when that fails: a drive already pulled out, or still busy
+            if subprocess.run(["umount", mp], capture_output=True).returncode != 0:
+                subprocess.run(["umount", "-l", mp], capture_output=True)
         try:
             os.rmdir(mp)
         except OSError:
             pass
+
+
+def cmd_eject(dev):
+    """Write everything out and unmount, never lazily: exit 3 while something
+    still has a file open on it, so the caller doesn't say it's safe when it isn't."""
+    subprocess.run(["sync"])
+    mp = target(dev)
+    if os.path.ismount(mp):
+        r = subprocess.run(["umount", mp], capture_output=True, text=True)
+        if r.returncode != 0:
+            print("ERROR busy", file=sys.stderr)
+            return 3
+    try:
+        os.rmdir(mp)
+    except OSError:
+        pass
+    return 0
 
 
 def cmd_save(dev, name):
@@ -144,6 +186,10 @@ def main():
             print(json.dumps(drives()))
         elif len(args) == 2 and args[0] == "mount":
             print(cmd_mount(args[1]))
+        elif len(args) == 3 and args[0] == "mount" and args[2] in ("--rw", "--ro"):
+            print(cmd_mount(args[1], rw=args[2] == "--rw", ro=args[2] == "--ro"))
+        elif len(args) == 2 and args[0] == "eject":
+            return cmd_eject(args[1])
         elif args and args[0] == "unmount" and len(args) <= 2:
             cmd_unmount(args[1] if len(args) == 2 else None)
         elif len(args) == 3 and args[0] == "save":

@@ -1,0 +1,1641 @@
+#!/usr/bin/python3
+"""LiteLink OS: the device bridge for LiteOS (a Chromium native messaging host).
+
+Chromium starts this program when LiteLink's own kiosk extension
+(shell/litelink/webext) calls chrome.runtime.connectNative("com.litelink.devices")
+and talks to it over stdin/stdout: each message is a 4-byte length (native byte
+order) + UTF-8 JSON. Only that extension's ID may connect (allowed_origins in
+/etc/chromium/native-messaging-hosts/com.litelink.devices.json), and it only
+relays for the session's LiteOS address. The page-side API (window.LiteLink) is
+documented in docs/litelink-web-api.md; plan: docs/plans/device-bridge.md.
+
+Session settings come from the file named in LITELINK_SESSION (written by the
+shell's web launcher, inherited through Chromium's environment):
+  { "liteos": "https://liteos.example", "usb": "off" | "read" | "write", "printers": true | false }
+
+Requests carry an "id" and an "op"; every reply has the same id:
+  hello   {version}                      -> {version, capabilities}
+  list                                   -> {devices: [{id, kind, name, label, model, size, fstype}]}
+  browse  {device, path}                 -> {entries: [{name, dir, size, mtime}], free}
+  read    {device, path, offset, length} -> {data (base64), size, eof}      (length <= 512 KiB)
+  upload  {device, path, url, headers}   -> progress {sent, total}..., then {status, body}
+  write   {device, path, transfer, offset, data, final, overwrite}           (usb: write)
+                                         -> {written} ... {written, entry} on the final piece
+  download {device, path, url, headers, overwrite}                           (usb: write)
+                                         -> progress {received, total}..., then {entry}
+  mkdir   {device, path}                 -> {entry}                          (usb: write)
+  eject   {device}                       -> {done}   (unmounted, safe to pull out)
+  cancel  {transfer}                     -> {done}
+  audio.state                            -> {volume, muted, output, outputs, input}
+  audio.set {changes: {volume, muted, output, inputVolume, inputMuted, input}} -> audio.state
+  network.state                          -> {connected, kind, name, ip, gateway, dns, mac, wifi, vpn}
+  network.wifi                           -> {networks: [{ssid, signal, security, active}]}
+  system.info                            -> {os, version, build, device, processor, memory, hostname, ip, mac}
+  system.lock                            -> {done}  (LiteLink's lock screen over the session)
+  session.settings {page}                -> {done}  (LiteLink's Settings over the session)
+  power.restart / power.shutdown         -> {done}
+  bluetooth.state                        -> {present, powered, devices: [{mac, name, connected, kind}]}
+  bluetooth.scan                         -> {devices: [{mac, name}]}   (nearby, not paired; ~8 s)
+  bluetooth.connect {mac, on}            -> {done}  (a paired device only)
+  bluetooth.pair {mac} / bluetooth.remove {mac} / bluetooth.power {on}
+  display.state                          -> {displays: [{output, current, preferred, modes, rate}]}
+  display.set {output, mode}             -> {kept}  (LiteLink asks "Keep these display settings?") (device tier)
+  input.state                            -> {layout, variant, layouts: [{id, name}]}
+  input.layout {layout, variant}         -> {done}  (this session only: the saved layout returns after it)
+  time.state                             -> {timezone, ntp, synced}
+  time.zone {zone}                       -> {done}                                       (device tier)
+  print.printers                         -> {printers: [{id, name, default, kind, state, message, duplex,
+                                              color, media, mediaDefault}]}            (printers: on)
+  print.submit {printer, options, transfer, offset, data, final}  a PDF in pieces -> {sent} ... {sent, job}
+  print.submit {printer, options, url, headers}  a PDF from LiteOS -> progress {received, total}..., {job}
+  print.jobs                             -> {jobs: [{job, printer, title, state, message}]}   this session's, not done
+  print.cancel {job}                     -> {done}   (this session's jobs only)
+  print.find                             -> {printers: [{uri, name, kind, driverless, added}]}   found now (USB, network)
+  print.add {uri, name?}                 -> {printer, name}   driverless printers only
+  print.remove {printer}                 -> {done}
+
+Device tier (changes the device for whoever comes next): LiteLink asks for the
+admin password in its own dialog over the session (shell socket, bridge.py), when
+one is set and the device is a kiosk or Admin lock asks for it; a correct
+password allows device-tier requests for one minute (ADMIN_FOR).
+Events (no id): {"event": "device-added" | "device-removed" | "device-ejected" | "audio" | "network" |
+"printers" | "print-job",
+"data": {...}}; "audio" / "network" carry the new state and start once a page asked for that state;
+"printers" (the new list) and "print-job" ({job, state, message}) once a page used printing. An
+"audio" event caused by audio.set carries "by": the request's id, so the extension can pass it to every
+window except the one that made the change (it has the new state in its reply).
+
+Wi-Fi and VPN are read only here, on purpose: they carry the connection itself,
+so joining, switching or turning them off stays in LiteLink's own Settings.
+
+Writing: drives are mounted read-only, and switched to writable only while
+something is being written, back SETTLE_AFTER seconds after the last write
+(one lock per drive around each check and switch, so a write never starts on a
+drive that's switching back). A writable FAT drive is marked "in use", and a
+drive Windows left hibernated, a damaged one or a locked card can't be written
+at all but can still be read. A file is written under a hidden name next to
+its target (".name.xxxxxxxx.part") and renamed when complete, so a half-written
+file never shows; parts left by a page that stopped are deleted before
+unmounting. Eject stops that drive's copies, waits for them, and unmounts
+without the lazy fallback: it only says done when the drive is safe to pull out.
+
+Two ways to get a file's contents: read (in pieces, through Chromium, for files
+the page handles itself) and upload (streamed by this program straight to a URL
+on the session's LiteOS origin, PUT with the raw file as the body; nothing
+passes through Chromium or the page).
+
+Who may do what is decided here, never by the page (tiers, plan section 15):
+read (always), session (allowed unless the connection turns the area off) and
+device (changes the device for whoever comes next: display.set and time.zone;
+LiteLink asks for its admin password, see above). Writing to a USB drive is the
+admin's choice per connection ("USB drives: Read and write"), so it needs no
+password at the time.
+"""
+import base64
+import http.client
+import json
+import os
+import select
+import signal
+import ssl
+import struct
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+
+sys.path.insert(0, "/usr/lib/litelink/shell")
+from litelink import system  # noqa: E402  (the shell's own helpers: litelink-media through sudo)
+
+VERSION = 1
+CHUNK = 256 * 1024
+READ_CHUNK = 512 * 1024             # messages to Chromium are limited to 1 MB, and base64 grows by 4/3
+MAX_FILE = 512 * 1024 * 1024        # per upload, download or written file
+MAX_MESSAGE = 1024 * 1024           # a write piece (512 KiB as base64) is the largest request
+SKIP = {"System Volume Information", "$RECYCLE.BIN", "$Recycle.Bin", "lost+found"}
+TIERS = {"hello": "read", "list": "read", "browse": "session", "read": "session", "upload": "session",
+         "write": "session", "download": "session", "mkdir": "session", "eject": "session", "cancel": "session",
+         "audio.state": "read", "audio.set": "session", "network.state": "read", "network.wifi": "read",
+         "system.info": "read", "system.lock": "session", "session.settings": "session",
+         # power and Bluetooth: no admin password (the admin's choice: not risky to the device's setup)
+         "power.restart": "session", "power.shutdown": "session",
+         "bluetooth.state": "read", "bluetooth.scan": "session", "bluetooth.connect": "session",
+         "bluetooth.pair": "session", "bluetooth.remove": "session", "bluetooth.power": "session",
+         "display.state": "read", "display.set": "device",
+         "input.state": "read", "input.layout": "session", "time.state": "read", "time.zone": "device",
+         # printing, and setting printers up: no password; the connection's Printers setting turns it off
+         "print.printers": "session", "print.submit": "session", "print.jobs": "session", "print.cancel": "session",
+         "print.find": "session", "print.add": "session", "print.remove": "session"}
+DEVICE_WHY = {"display.set": "Change the screen resolution", "time.zone": "Change the time zone"}
+ADMIN_FOR = 60             # seconds a correct admin password allows device-tier requests
+MAC = __import__("re").compile(r"[0-9A-F]{2}(:[0-9A-F]{2}){5}")
+AUDIO_CHANGES = {"volume": int, "muted": bool, "output": str, "inputVolume": int, "inputMuted": bool, "input": str}
+AREA = {"list": "usb", "browse": "usb", "read": "usb", "upload": "usb",
+        "write": "usb", "download": "usb", "mkdir": "usb", "eject": "usb",
+        "print.printers": "print", "print.submit": "print", "print.jobs": "print", "print.cancel": "print",
+        "print.find": "print", "print.add": "print", "print.remove": "print"}
+WRITE_OPS = {"write", "download", "mkdir"}        # only with "usb": "write"
+BAD_NAME = set('<>:"/\\|?*')                       # not allowed in names on FAT, exFAT and NTFS
+# headers a page may set on an upload; everything else (Host, Cookie, Content-Length,
+# X-Forwarded-For, X-Real-IP… which a server might trust) is dropped
+UPLOAD_HEADERS = {"authorization", "content-type"}
+UPLOAD_PREFIXES = ("x-litelink-", "x-transfer-")
+
+out_lock = threading.Lock()
+
+
+def send(msg):
+    data = json.dumps(msg, separators=(",", ":")).encode()
+    with out_lock:
+        sys.stdout.buffer.write(struct.pack("=I", len(data)) + data)
+        sys.stdout.buffer.flush()
+
+
+def log(*args):
+    print("litelink-devices:", *args, file=sys.stderr, flush=True)
+
+
+class Refused(Exception):
+    """An error message for the person at the device (shown as it is); code
+    "cancelled" marks a copy that was stopped (by the page or an eject)."""
+
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
+
+
+# ---------------------------------------------------------------- session
+def load_session():
+    try:
+        with open(os.environ.get("LITELINK_SESSION", "")) as f:
+            s = json.load(f)
+    except (OSError, ValueError):
+        return {"liteos": "", "usb": "off", "printers": False, "shell": ""}
+    origin = s.get("liteos") if isinstance(s.get("liteos"), str) else ""
+    usb = s.get("usb") if s.get("usb") in ("off", "read", "write") else "off"
+    shell = s.get("shell") if isinstance(s.get("shell"), str) else ""
+    return {"liteos": origin.rstrip("/"), "usb": usb, "printers": s.get("printers") is True, "shell": shell}
+
+
+SESSION = load_session()
+
+
+def origin_of(url):
+    p = urllib.parse.urlsplit(url)
+    try:
+        port = p.port or (443 if p.scheme == "https" else 80)
+    except ValueError:
+        port = -1
+    return p.scheme, (p.hostname or "").lower(), port
+
+
+def allowed(op):
+    """Raise Refused unless this session allows op."""
+    tier = TIERS.get(op)
+    if tier is None:
+        raise Refused("LiteLink doesn't know that request.")
+    if AREA.get(op) == "usb" and SESSION["usb"] == "off":
+        raise Refused("USB drives are turned off for this connection.")
+    if AREA.get(op) == "print" and not printing():
+        if SESSION["printers"]:           # allowed, but the print module isn't on this device
+            raise Refused("Printing isn't installed on this device.")
+        raise Refused("Printing is turned off for this connection.")
+    if op in WRITE_OPS and SESSION["usb"] != "write":
+        raise Refused("This connection can only read USB drives.")
+    if tier == "device":                  # last: no password prompt for something refused anyway
+        admin_allowed(op)
+
+
+def printing():
+    """The connection allows printing and the print module is installed."""
+    try:
+        return SESSION["printers"] and bool(system.print_engine())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def shell_request(req, timeout=600):
+    """Ask the shell for one of LiteLink's own screens (bridge.py); -> its answer."""
+    import socket
+    if not SESSION["shell"]:
+        raise Refused("LiteLink can't show that here.")
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            sock.connect(SESSION["shell"])
+            sock.sendall((json.dumps(req) + "\n").encode())
+            data = b""
+            while not data.endswith(b"\n"):
+                block = sock.recv(4096)
+                if not block:
+                    break
+                data += block
+        return json.loads(data or b"{}")
+    except (OSError, ValueError):
+        raise Refused("LiteLink didn't answer.")
+
+
+admin = {"until": 0.0, "lock": threading.Lock()}
+
+
+def admin_allowed(op):
+    """Device tier: LiteLink asks for the admin password (its own dialog over the
+    session); a correct one allows device-tier requests for ADMIN_FOR seconds."""
+    with admin["lock"]:                   # one prompt at a time
+        if time.monotonic() < admin["until"]:
+            return
+        if not shell_request({"ask": "admin", "why": DEVICE_WHY.get(op, "Change this device")}).get("ok"):
+            raise Refused("That needs the LiteLink admin password.")
+        admin["until"] = time.monotonic() + ADMIN_FOR
+
+
+def capabilities():
+    caps = {"network": True, "system": True, "session": True, "power": True, "display": True, "input": True,
+            "time": True}
+    try:
+        if system.bt_adapter()["present"]:
+            caps["bluetooth"] = True
+    except Exception:  # noqa: BLE001
+        pass
+    if SESSION["usb"] != "off":
+        caps["storage"] = {"usb": SESSION["usb"]}
+    if printing():
+        caps["print"] = True
+    devices = audio_devices()
+    if devices["sinks"] or devices["sources"]:
+        caps["audio"] = {"output": bool(devices["sinks"]), "input": bool(devices["sources"])}
+    return caps
+
+
+# ---------------------------------------------------------------- sound, network, system
+def audio_devices():
+    try:
+        return system.audio_devices() if system.have("wpctl") else {"sinks": [], "sources": []}
+    except Exception:  # noqa: BLE001 - no PipeWire session: no audio
+        return {"sinks": [], "sources": []}
+
+
+def audio_state():
+    devices = audio_devices()
+    vol, muted = system.volume_get() if devices["sinks"] else (0, False)
+    in_vol, in_muted = system.source_volume_get() if devices["sources"] else (0, False)
+    pick = lambda lst: next(({"id": d["id"], "name": d["name"]} for d in lst if d["default"]), None)  # noqa: E731
+    strip = lambda lst: [{"id": d["id"], "name": d["name"], "default": d["default"]} for d in lst]  # noqa: E731
+    return {"volume": vol, "muted": muted, "output": pick(devices["sinks"]), "outputs": strip(devices["sinks"]),
+            "input": {"volume": in_vol, "muted": in_muted, "device": pick(devices["sources"]),
+                      "devices": strip(devices["sources"])}}
+
+
+def op_audio_state(msg):
+    WATCH.start("audio")
+    return audio_state()
+
+
+def op_audio_set(msg):
+    changes = msg.get("changes")
+    if not isinstance(changes, dict) or not changes or any(
+            k not in AUDIO_CHANGES or type(v) is not AUDIO_CHANGES[k] for k, v in changes.items()):
+        raise Refused("That request isn't valid.")
+    devices = audio_devices()
+    for key, kind in (("output", "sinks"), ("input", "sources")):
+        if key in changes and changes[key] not in {d["id"] for d in devices[kind]}:
+            raise Refused("That sound device isn't connected any more.")
+    clamp = lambda v: max(0, min(100, v))  # noqa: E731
+    if "output" in changes:
+        system.audio_default(changes["output"])
+    if "input" in changes:
+        system.audio_default(changes["input"])
+    if "volume" in changes:
+        system.volume_set(clamp(changes["volume"]))
+    if "muted" in changes:
+        system.mute_set(changes["muted"])
+    if "inputVolume" in changes:
+        system.source_volume_set(clamp(changes["inputVolume"]))
+    if "inputMuted" in changes:
+        system.source_mute_set(changes["inputMuted"])
+    WATCH.start("audio")
+    state = audio_state()
+    with WATCH.lock:
+        changed = state != WATCH.last.get("audio")
+        WATCH.last["audio"] = state       # the watcher won't send this change again
+    if changed:                           # the other LiteOS windows hear of it; the one that asked has the reply
+        send({"event": "audio", "data": state, "by": msg.get("id")})
+    return state
+
+
+def mac_of(dev):
+    return system._read(f"/sys/class/net/{dev}/address") if dev and "/" not in dev else ""
+
+
+def network_state():
+    st = system.network_status()
+    gw, dns = system.gateway_dns()
+    wifi = {"present": system.wifi_present()}
+    if wifi["present"]:
+        wifi["enabled"] = system.wifi_enabled()
+        wifi["network"] = system.wifi_current() or None
+    try:
+        tunnels = [{"name": t.get("name", ""), "active": bool(t.get("active"))} for t in system.vpn_list()]
+    except Exception:  # noqa: BLE001
+        tunnels = []
+    connected = st.get("state") == "connected"
+    return {"connected": connected, "kind": st.get("kind", "none") if connected else "none",
+            "name": st.get("name", "") if connected else "", "ip": st.get("ip", ""),
+            "gateway": gw if connected else "", "dns": dns if connected else "",
+            "mac": mac_of(st.get("device", "")), "wifi": wifi, "vpn": tunnels}
+
+
+def op_network_state(msg):
+    WATCH.start("network")
+    return network_state()
+
+
+def op_network_wifi(msg):
+    if not system.wifi_present():
+        return {"networks": []}
+    return {"networks": [{"ssid": n["ssid"], "signal": n["signal"], "security": n["security"], "active": n["active"]}
+                         for n in system.wifi_list()]}
+
+
+def op_system_info(msg):
+    import platform
+    import socket
+    osr = system.os_release()
+    cpu = ""
+    for line in system._read("/proc/cpuinfo").splitlines():
+        if line.startswith("model name"):
+            cpu = " ".join(line.split(":", 1)[1].split())
+            break
+    device = " ".join(x for x in (system._read("/sys/class/dmi/id/sys_vendor"),
+                                  system._read("/sys/class/dmi/id/product_name")) if x)
+    st = system.network_status()
+    return {"os": osr.get("PRETTY_NAME", "LiteLink OS"), "version": osr.get("VERSION_ID", ""),
+            "build": osr.get("BUILD_ID", ""), "device": device, "processor": cpu or platform.machine(),
+            "memory": system.memory_kb() * 1024, "hostname": socket.gethostname(),
+            "ip": st.get("ip", ""), "mac": mac_of(st.get("device", ""))}
+
+
+def op_lock(msg):
+    shell_request({"do": "lock"}, timeout=10)
+    return {"done": True}
+
+
+def op_settings(msg):
+    page = msg.get("page") if isinstance(msg.get("page"), str) else "network"
+    shell_request({"do": "settings", "page": page}, timeout=10)
+    return {"done": True}
+
+
+def op_power(msg):
+    system.power("reboot" if msg["op"] == "power.restart" else "poweroff")
+    return {"done": True}
+
+
+def bt_mac(msg):
+    mac = msg.get("mac")
+    if not isinstance(mac, str) or not MAC.fullmatch(mac.upper()):
+        raise Refused("That Bluetooth device isn't valid.")
+    return mac.upper()
+
+
+def bt_ready():
+    ad = system.bt_adapter()
+    if not ad["present"]:
+        raise Refused("This device has no Bluetooth.")
+    return ad
+
+
+def op_bt_state(msg):
+    ad = system.bt_adapter()
+    devices = system.bt_paired() if ad["present"] and ad["powered"] else []
+    return {"present": ad["present"], "powered": ad["powered"],
+            "devices": [{"mac": d["mac"], "name": d["name"], "connected": d["connected"], "kind": d["kind"]}
+                        for d in devices]}
+
+
+def op_bt_scan(msg):
+    if not bt_ready()["powered"]:
+        raise Refused("Bluetooth is off.")
+    return {"devices": [{"mac": m, "name": n} for m, n in system.bt_scan(8)]}
+
+
+def op_bt_connect(msg):
+    mac = bt_mac(msg)
+    bt_ready()
+    if mac not in {d["mac"] for d in system.bt_paired()}:
+        raise Refused("Pair that Bluetooth device first.")
+    system.bt_connect(mac, msg.get("on") is not False)
+    return {"done": True}
+
+
+def op_bt_pair(msg):
+    mac = bt_mac(msg)
+    if not bt_ready()["powered"]:
+        raise Refused("Bluetooth is off.")
+    ok, why = system.bt_pair(mac)
+    if not ok:
+        raise Refused(f"Pairing didn't work ({why}).")
+    return {"done": True}
+
+
+def op_bt_remove(msg):
+    mac = bt_mac(msg)
+    bt_ready()
+    system.bt_remove(mac)
+    return {"done": True}
+
+
+def op_bt_power(msg):
+    bt_ready()
+    system.bt_power(msg.get("on") is not False)
+    return {"done": True}
+
+
+def op_display_state(msg):
+    return {"displays": [{"output": d["output"], "current": d["current"], "preferred": d.get("preferred", ""),
+                          "modes": d["modes"], "rate": d["rate"]} for d in system.displays()]}
+
+
+def op_display_set(msg):
+    out, mode = msg.get("output"), msg.get("mode")
+    d = next((x for x in system.displays() if x["output"] == out), None)
+    if d is None or mode not in d["modes"]:
+        raise Refused("That screen or resolution isn't available.")
+    r = shell_request({"do": "display", "output": out, "mode": mode}, timeout=120)
+    if not r.get("ok"):
+        raise Refused("The resolution couldn't be changed.")
+    return {"kept": bool(r.get("kept"))}
+
+
+def op_input_state(msg):
+    layout, variant = system.keyboard_current()
+    layouts, _ = system.keyboard_layouts()
+    return {"layout": layout, "variant": variant, "layouts": [{"id": i, "name": n} for i, n in layouts]}
+
+
+def op_input_layout(msg):
+    layout, variant = msg.get("layout"), msg.get("variant") or ""
+    layouts, variants = system.keyboard_layouts()
+    if layout not in {i for i, _ in layouts} or (variant and variant not in {v for v, _ in variants.get(layout, [])}):
+        raise Refused("That keyboard layout isn't available.")
+    system.run(["setxkbmap", "-layout", layout] + (["-variant", variant] if variant else []))
+    return {"done": True}
+
+
+def op_time_state(msg):
+    t = system.time_status()
+    return {"timezone": t["timezone"], "ntp": t["ntp"], "synced": t["synced"]}
+
+
+def op_time_zone(msg):
+    zone = msg.get("zone")
+    import re as _re
+    if (not isinstance(zone, str) or not _re.fullmatch(r"[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*", zone)
+            or not os.path.exists(f"/usr/share/zoneinfo/{zone}")):
+        raise Refused("That time zone isn't valid.")
+    if not system.set_timezone(zone):
+        raise Refused("The time zone couldn't be changed.")
+    return {"done": True}
+
+
+class Watch:
+    """"audio" / "network" events: started the first time a page asks for that
+    state (nothing runs for a page that never does), sent only on a real change."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.running = set()
+        self.last = {}
+
+    def start(self, area):
+        with self.lock:
+            if area in self.running:
+                return
+            self.running.add(area)
+        threading.Thread(target=self._audio if area == "audio" else self._network, daemon=True).start()
+
+    def _changed(self, area, state):
+        if state != self.last.get(area):
+            self.last[area] = state
+            send({"event": area, "data": state})
+
+    def _audio(self):
+        self.last["audio"] = audio_state()
+        while True:                # PipeWire has no cheap change feed through wpctl: look every 2 s
+            time.sleep(2)
+            try:
+                self._changed("audio", audio_state())
+            except Exception as e:  # noqa: BLE001
+                log("audio watch:", e)
+
+    def _network(self):
+        self.last["network"] = network_state()
+        try:
+            mon = subprocess.Popen(["nmcli", "monitor"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+        except OSError:
+            mon = None
+        while True:
+            if mon is None:
+                time.sleep(5)
+            else:
+                ready, _, _ = select.select([mon.stdout], [], [], 30)
+                if ready:
+                    if not mon.stdout.read(4096):
+                        mon = None
+                        continue
+                    time.sleep(1)          # a change brings a burst of lines: settle, then look once
+                    while select.select([mon.stdout], [], [], 0)[0] and mon.stdout.read(4096):
+                        pass
+            try:
+                self._changed("network", network_state())
+            except Exception as e:  # noqa: BLE001
+                log("network watch:", e)
+
+
+WATCH = Watch()
+
+
+# ---------------------------------------------------------------- drives
+SETTLE_AFTER = 3  # seconds after the last write before a drive is read-only again
+
+
+class Drives:
+    """The USB drives litelink-media offers, mounted the first time they're used."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.known = {}      # id -> partition (from litelink-media list)
+        self.mounts = {}     # id -> mount point mounted by us
+        self.ejected = set()  # ejected but still plugged in: refused until unplugged
+        self.parts = set()   # half-written files (deleted if left behind)
+        self.writers = {}    # id -> requests writing to it right now
+        self.switching = {}  # id -> lock held while deciding and switching read-only / writable
+        self.timers = {}     # id -> the pending switch back to read-only
+
+    @staticmethod
+    def public(p):
+        label = (p.get("label") or "").strip()
+        model = (p.get("drive") or "").strip()
+        return {"id": p["path"].rsplit("/", 1)[-1], "kind": "usb", "name": label or model or "USB drive",
+                "label": label, "model": model, "size": int(p.get("size") or 0), "fstype": p.get("fstype") or ""}
+
+    def scan(self):
+        """-> (added, removed) since the last scan."""
+        found = {}
+        for p in system.media_list():
+            if isinstance(p, dict) and isinstance(p.get("path"), str) and p["path"].startswith("/dev/"):
+                found[p["path"].rsplit("/", 1)[-1]] = p
+        with self.lock:
+            added = [found[i] for i in found if i not in self.known]
+            removed = [i for i in self.known if i not in found]
+            self.known = found
+            for i in removed:
+                self.mounts.pop(i, None)
+                self.ejected.discard(i)
+        for i in removed:
+            system.media_unmount("/dev/" + i)   # pulled out: clears the stale mount point
+        return added, removed
+
+    def list(self):
+        with self.lock:
+            return [self.public(p) for i, p in self.known.items() if i not in self.ejected]   # ejected: gone until replugged
+
+    def root(self, dev):
+        with self.lock:
+            p = self.known.get(dev)
+            if p is None:
+                raise Refused("That USB drive isn't plugged in any more.")
+            if dev in self.ejected:
+                raise Refused("The USB drive was ejected. Unplug it and plug it in again to use it.")
+            mp = self.mounts.get(dev) or p.get("mountpoint")
+        if mp and os.path.ismount(mp):
+            return mp
+        mp = system.media_mount(p["path"])          # read-only: writing switches it (writable())
+        if not mp:
+            raise Refused("The USB drive couldn't be opened. Its format may not be supported.")
+        with self.lock:
+            self.mounts[dev] = mp
+        return mp
+
+    def resolve(self, dev, path):
+        """A path on the drive -> absolute path, kept inside the mount (no .., no links out)."""
+        if not isinstance(dev, str) or not isinstance(path, str) or "\0" in path or len(path) > 4096:
+            raise Refused("That path isn't valid.")
+        root = os.path.realpath(self.root(dev))
+        parts = [x for x in path.replace("\\", "/").split("/") if x not in ("", ".")]
+        if ".." in parts:
+            raise Refused("That path isn't valid.")
+        full = os.path.realpath(os.path.join(root, *parts))
+        if full != root and not full.startswith(root + os.sep):
+            raise Refused("That path isn't valid.")
+        return full
+
+    def new_path(self, dev, path):
+        """A path to create on the drive -> (parent folder, name, full path); the
+        folder must exist inside the drive, the name must be one all of FAT, exFAT
+        and NTFS accept."""
+        if not isinstance(path, str) or "\0" in path or len(path) > 4096:
+            raise Refused("That path isn't valid.")
+        parts = [x for x in path.replace("\\", "/").split("/") if x not in ("", ".")]
+        if not parts:
+            raise Refused("Choose a name.")
+        name = parts[-1]
+        if (name == ".." or len(name.encode()) > 255 or name != name.rstrip(" .") or name.startswith(".")
+                or any(c in BAD_NAME or ord(c) < 32 for c in name)):
+            raise Refused('Names on a USB drive can\'t contain < > : " / \\ | ? * or end with a dot or space.')
+        parent = self.resolve(dev, "/" + "/".join(parts[:-1]))
+        if not os.path.isdir(parent):
+            raise Refused("That folder isn't on the USB drive.")
+        return parent, name, os.path.join(parent, name)
+
+    def _switch(self, dev):
+        with self.lock:
+            return self.switching.setdefault(dev, threading.Lock())
+
+    def _cancel_settle(self, dev):
+        with self.lock:
+            t = self.timers.pop(dev, None)
+        if t:
+            t.cancel()
+
+    def writable(self, dev):
+        """Before a write, download or new folder: the drive switched to writable
+        (counted, so another writer finishing doesn't switch it back meanwhile). The
+        check and the switch hold the drive's switching lock, so a switch back to
+        read-only that's under way finishes first."""
+        mp = self.root(dev)
+        self._cancel_settle(dev)
+        with self._switch(dev):
+            with self.lock:
+                self.writers[dev] = self.writers.get(dev, 0) + 1
+            if os.statvfs(mp).f_flag & os.ST_RDONLY and not system.media_mount("/dev/" + dev, rw=True):
+                with self.lock:
+                    self.writers[dev] = max(0, self.writers.get(dev, 1) - 1)
+                raise Refused("This USB drive can only be read. Windows may have left it in fast startup or "
+                              "hibernation, it may need repairing, or it's locked (check its switch).")
+        return mp
+
+    def done_writing(self, dev):
+        """A write request is over: back to read-only a moment later, once nothing else is
+        writing and no half-written file waits (several files pasted one after another
+        stay on a writable drive instead of switching after each)."""
+        with self.lock:
+            self.writers[dev] = max(0, self.writers.get(dev, 1) - 1)
+            old = self.timers.pop(dev, None)
+            t = self.timers[dev] = threading.Timer(SETTLE_AFTER, self._settle_later, (dev,))
+        if old:
+            old.cancel()
+        t.daemon = True
+        t.start()
+
+    def _settle_later(self, dev):
+        with self.lock:
+            if self.timers.get(dev) is threading.current_thread():
+                del self.timers[dev]
+        self.settle(dev)
+
+    def settle(self, dev):
+        """Back to read-only when nothing is writing to the drive and no half-written file waits on it."""
+        with self._switch(dev):
+            with self.lock:
+                busy = self.writers.get(dev, 0) > 0
+                mp = self.mounts.get(dev) or self.known.get(dev, {}).get("mountpoint")   # mounted before this host started
+            if busy or not mp or dev in self.ejected:
+                return
+            under = os.path.realpath(mp) + os.sep
+            if any(part.startswith(under) for part in self.parts):
+                return
+            if os.path.ismount(mp) and not os.statvfs(mp).f_flag & os.ST_RDONLY:
+                system.media_readonly("/dev/" + dev)
+
+    def eject(self, dev):
+        """Stop this drive's copies, wait for them, unmount (never lazily). Raises
+        Refused if something still has it open, and the drive stays usable."""
+        with self.lock:
+            if dev not in self.known:
+                raise Refused("That USB drive isn't plugged in any more.")
+            if dev in self.ejected:
+                return
+            mp = self.mounts.get(dev) or self.known[dev].get("mountpoint")
+        stop_transfers(dev, "The copy stopped: the USB drive was ejected.")
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and (any(t["dev"] == dev for t in list(transfers.values()))
+                                               or self.writers.get(dev, 0) > 0):
+            time.sleep(0.1)
+        if mp:
+            self.drop_parts(os.path.realpath(mp) + os.sep)
+        self._cancel_settle(dev)
+        with self._switch(dev):           # a switch to read-only under way finishes first
+            if not system.media_eject("/dev/" + dev):
+                raise Refused("The USB drive is still in use. Wait a moment and try again.")
+            with self.lock:
+                self.mounts.pop(dev, None)
+                self.ejected.add(dev)
+
+    def drop_parts(self, under=None):
+        """Delete half-written files: all of them, or those inside one mount."""
+        for part in list(self.parts):
+            if under and not part.startswith(under):
+                continue
+            try:
+                os.remove(part)
+            except OSError:
+                pass
+            self.parts.discard(part)
+
+    def unmount_all(self):
+        self.drop_parts()
+        with self.lock:
+            mine = list(self.mounts)
+            self.mounts.clear()
+            timers = dict(self.timers)
+            self.timers.clear()
+        for dev, t in timers.items():
+            t.cancel()
+            if dev not in mine:           # mounted before this host: stays mounted, read-only now
+                self.settle(dev)
+        for dev in mine:
+            system.media_unmount("/dev/" + dev)
+
+
+DRIVES = Drives()
+
+
+def watch():
+    """device-added / device-removed: re-scan on block events from udev (no root
+    needed), or every 3 s if udevadm isn't usable."""
+    def rescan():
+        added, removed = DRIVES.scan()
+        for p in added:
+            send({"event": "device-added", "data": Drives.public(p)})
+        for dev in removed:
+            send({"event": "device-removed", "data": {"id": dev}})
+
+    try:
+        mon = subprocess.Popen(["udevadm", "monitor", "--udev", "--subsystem-match=block"],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+    except OSError:
+        mon = None
+    while True:
+        if mon is None:
+            time.sleep(3)
+            rescan()
+            continue
+        ready, _, _ = select.select([mon.stdout], [], [], 30)
+        if ready:
+            if not mon.stdout.read(4096):
+                mon = None
+                continue
+            time.sleep(0.8)            # a stick brings several events (disk, partitions): scan once
+            while select.select([mon.stdout], [], [], 0)[0] and mon.stdout.read(4096):
+                pass
+        rescan()
+
+
+# ---------------------------------------------------------------- requests
+transfers = {}          # request id -> {"ev": Event (set = stop), "dev": drive id, "why": message}
+
+
+def start_transfer(tid, dev):
+    t = transfers.setdefault(tid, {"ev": threading.Event(), "dev": dev, "why": "Cancelled."})
+    return t
+
+
+def stop_transfers(dev=None, why="Cancelled."):
+    """Stop the copies to or from one drive (or all of them)."""
+    for t in list(transfers.values()):
+        if dev is None or t["dev"] == dev:
+            t["why"] = why
+            t["ev"].set()
+
+
+def check_stop(t):
+    if t["ev"].is_set():
+        raise Refused(t["why"], code="cancelled")
+
+
+def op_browse(msg):
+    full = DRIVES.resolve(msg.get("device"), msg.get("path", "/"))
+    if not os.path.isdir(full):
+        raise Refused("That folder isn't on the USB drive any more.")
+    try:
+        names = os.listdir(full)
+    except OSError:
+        raise Refused("The USB drive couldn't be read.")
+    entries = []
+    for name in names:
+        p = os.path.join(full, name)
+        if name.startswith(".") or name in SKIP or os.path.islink(p):   # links could point off the drive
+            continue
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        isdir = os.path.isdir(p)
+        if not isdir and not os.path.isfile(p):
+            continue
+        entries.append({"name": name, "dir": isdir, "size": 0 if isdir else st.st_size, "mtime": int(st.st_mtime)})
+    try:
+        vfs = os.statvfs(full)
+        free = vfs.f_bavail * vfs.f_frsize
+    except OSError:
+        free = None
+    return {"entries": entries, "free": free}
+
+
+def op_read(msg):
+    """One piece of a file: {data (base64), size, eof}."""
+    full = DRIVES.resolve(msg.get("device"), msg.get("path"))
+    if not os.path.isfile(full):
+        raise Refused("That file isn't on the USB drive any more.")
+    offset, length = msg.get("offset", 0), msg.get("length", READ_CHUNK)
+    if type(offset) is not int or type(length) is not int or offset < 0 or not 0 < length <= READ_CHUNK:
+        raise Refused("That request isn't valid.")
+    try:
+        size = os.path.getsize(full)
+        with open(full, "rb") as f:
+            f.seek(offset)
+            data = f.read(length)
+    except OSError:
+        raise Refused("The USB drive couldn't be read.")
+    return {"data": base64.b64encode(data).decode(), "size": size, "eof": offset + len(data) >= size}
+
+
+def allowed_headers(headers):
+    """-> (content type or None, [(name, value)]) from a page's headers, keeping
+    only those listed in UPLOAD_HEADERS / UPLOAD_PREFIXES."""
+    if not isinstance(headers, dict):
+        raise Refused("That request isn't valid.")
+    ctype, extra = None, []
+    for k, v in headers.items():
+        if not isinstance(k, str) or not isinstance(v, str) or len(v) > 4096 or any(c in k + v for c in "\r\n"):
+            raise Refused("That request isn't valid.")
+        if k.lower() == "content-type":
+            ctype = v
+        elif k.lower() in UPLOAD_HEADERS or k.lower().startswith(UPLOAD_PREFIXES):
+            extra.append((k, v))
+    return ctype, extra
+
+
+def entry_of(full):
+    st = os.stat(full)
+    isdir = os.path.isdir(full)
+    return {"name": os.path.basename(full), "dir": isdir, "size": 0 if isdir else st.st_size, "mtime": int(st.st_mtime)}
+
+
+def part_for(parent, name, key):
+    import hashlib
+    return os.path.join(parent, ".%s.%s.part" % (name, hashlib.sha1(key.encode()).hexdigest()[:8]))
+
+
+def finish(part, full, overwrite):
+    """A complete part file becomes the target: written out, then renamed."""
+    with open(part, "rb+") as f:
+        os.fsync(f.fileno())
+    if os.path.exists(full) and (not overwrite or os.path.isdir(full)):
+        raise Refused("Something with that name is already on the USB drive.")
+    os.replace(part, full)
+    DRIVES.parts.discard(part)
+    try:
+        fd = os.open(os.path.dirname(full), os.O_RDONLY)
+        os.fsync(fd)
+        os.close(fd)
+    except OSError:
+        pass
+    return entry_of(full)
+
+
+def write_error(e, part):
+    """An OSError while writing -> a sentence; the part file goes."""
+    import errno
+    try:
+        os.remove(part)
+    except OSError:
+        pass
+    DRIVES.parts.discard(part)
+    if e.errno == errno.ENOSPC:
+        return Refused("The USB drive is full.")
+    if e.errno == errno.EROFS:
+        return Refused("The USB drive is read-only (check its lock switch).")
+    if e.errno in (errno.EIO, errno.ENODEV, errno.ENOENT):
+        return Refused("The USB drive was removed.")
+    log("write failed:", e)
+    return Refused("The file couldn't be written to the USB drive.")
+
+
+def op_write(msg):
+    """One piece of a file the page writes: pieces in order from offset 0; the last
+    one (final) puts the file in place."""
+    key, offset, data = msg.get("transfer"), msg.get("offset", 0), msg.get("data", "")
+    final, overwrite = msg.get("final") is True, msg.get("overwrite") is True
+    if not isinstance(key, str) or not key or type(offset) is not int or offset < 0 or not isinstance(data, str):
+        raise Refused("That request isn't valid.")
+    try:
+        chunk = base64.b64decode(data, validate=True)
+    except ValueError:
+        raise Refused("That request isn't valid.")
+    if len(chunk) > READ_CHUNK or offset + len(chunk) > MAX_FILE:
+        raise Refused("Files larger than 512 MB can't be written.")
+    dev = msg.get("device")
+    DRIVES.writable(dev)
+    try:
+        return write_piece(msg, dev, key, offset, chunk, final, overwrite)
+    finally:
+        DRIVES.done_writing(dev)
+
+
+def write_piece(msg, dev, key, offset, chunk, final, overwrite):
+    parent, name, full = DRIVES.new_path(dev, msg.get("path"))
+    part = part_for(parent, name, key)
+    try:
+        if offset == 0:
+            if os.path.exists(full) and (not overwrite or os.path.isdir(full)):
+                raise Refused("Something with that name is already on the USB drive.")
+            DRIVES.parts.add(part)
+            f = open(part, "wb")
+        else:
+            if part not in DRIVES.parts or os.path.getsize(part) != offset:
+                raise Refused("The file has to be written from the start again.")
+            f = open(part, "r+b")
+            f.seek(offset)
+        with f:
+            f.write(chunk)
+        if final:
+            return {"written": offset + len(chunk), "entry": finish(part, full, overwrite)}
+    except OSError as e:
+        raise write_error(e, part)
+    return {"written": offset + len(chunk)}
+
+
+def op_download(msg):
+    """Stream a file from the session's LiteOS (GET url) onto the drive."""
+    tid = msg["id"]
+    url = msg.get("url")
+    if not isinstance(url, str) or not SESSION["liteos"]:
+        raise Refused("The copy couldn't start.")
+    if origin_of(url) != origin_of(SESSION["liteos"]):
+        raise Refused("LiteLink only copies files from this session's LiteOS.")
+    _, extra = allowed_headers(msg.get("headers") or {})
+    dev = msg.get("device")
+    DRIVES.writable(dev)
+    try:
+        return download_to(msg, dev, tid, url, extra)
+    finally:
+        DRIVES.done_writing(dev)
+
+
+def download_to(msg, dev, tid, url, extra):
+    overwrite = msg.get("overwrite") is True
+    parent, name, full = DRIVES.new_path(dev, msg.get("path"))
+    if os.path.exists(full) and (not overwrite or os.path.isdir(full)):
+        raise Refused("Something with that name is already on the USB drive.")
+    part = part_for(parent, name, tid)
+    t = start_transfer(tid, dev)
+    parts = urllib.parse.urlsplit(url)
+    scheme, host, port = origin_of(url)
+    conn = (http.client.HTTPSConnection(host, port, timeout=60, context=ssl.create_default_context())
+            if scheme == "https" else http.client.HTTPConnection(host, port, timeout=60))
+    received, last = 0, 0.0
+    try:
+        conn.putrequest("GET", (parts.path or "/") + (("?" + parts.query) if parts.query else ""))
+        for k, v in extra:
+            conn.putheader(k, v)
+        conn.endheaders()
+        resp = conn.getresponse()
+        if resp.status != 200:
+            raise Refused(f"LiteOS answered with an error ({resp.status}).")
+        length = resp.getheader("Content-Length")
+        total = int(length) if length and length.isdigit() else None
+        if total is not None and total > MAX_FILE:
+            raise Refused("Files larger than 512 MB can't be copied.")
+        DRIVES.parts.add(part)
+        try:
+            with open(part, "wb") as f:
+                while True:
+                    check_stop(t)
+                    try:
+                        block = resp.read(CHUNK)
+                    except (OSError, http.client.HTTPException):     # the network, not the drive
+                        raise Refused("LiteOS couldn't be reached to copy the file.")
+                    if not block:
+                        break
+                    received += len(block)
+                    if received > MAX_FILE:
+                        raise Refused("Files larger than 512 MB can't be copied.")
+                    f.write(block)
+                    now = time.monotonic()
+                    if now - last > 0.25:
+                        last = now
+                        send({"id": tid, "progress": {"received": received, "total": total}})
+            if total is not None and received != total:     # the connection ended early
+                raise Refused("The connection to LiteOS was lost before the file was complete. Try again.")
+            entry = finish(part, full, overwrite)
+        except OSError as e:
+            raise write_error(e, part)
+    except Refused:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        DRIVES.parts.discard(part)
+        raise
+    except (OSError, http.client.HTTPException) as e:
+        log("download failed:", e)
+        raise Refused("LiteOS couldn't be reached to copy the file.")
+    finally:
+        conn.close()
+        transfers.pop(tid, None)
+    send({"id": tid, "progress": {"received": received, "total": received}})
+    return {"entry": entry}
+
+
+def op_mkdir(msg):
+    dev = msg.get("device")
+    DRIVES.writable(dev)
+    try:
+        parent, name, full = DRIVES.new_path(dev, msg.get("path"))
+        try:
+            os.mkdir(full)
+        except FileExistsError:
+            raise Refused("Something with that name is already on the USB drive.")
+        except OSError as e:
+            raise write_error(e, "")
+        return {"entry": entry_of(full)}
+    finally:
+        DRIVES.done_writing(dev)
+
+
+def op_eject(msg):
+    dev = msg.get("device")
+    if not isinstance(dev, str):
+        raise Refused("That request isn't valid.")
+    DRIVES.eject(dev)                      # stops that drive's copies only
+    send({"event": "device-ejected", "data": {"id": dev}})
+    return {"done": True}
+
+
+def op_upload(msg):
+    """Stream a file from the drive to PUT url (on the session's LiteOS origin)."""
+    tid = msg["id"]
+    url, headers = msg.get("url"), msg.get("headers") or {}
+    if not isinstance(url, str) or not isinstance(headers, dict) or not SESSION["liteos"]:
+        raise Refused("The upload couldn't start.")
+    if origin_of(url) != origin_of(SESSION["liteos"]):
+        raise Refused("LiteLink only sends files to this session's LiteOS.")
+    ctype, extra = allowed_headers(headers)
+    ctype = ctype or "application/octet-stream"
+    full = DRIVES.resolve(msg.get("device"), msg.get("path"))
+    if not os.path.isfile(full):
+        raise Refused("That file isn't on the USB drive any more.")
+    total = os.path.getsize(full)
+    if total > MAX_FILE:
+        raise Refused("Files larger than 512 MB can't be sent.")
+    t = start_transfer(tid, msg.get("device"))
+    parts = urllib.parse.urlsplit(url)
+    scheme, host, port = origin_of(url)
+    conn = (http.client.HTTPSConnection(host, port, timeout=60, context=ssl.create_default_context())
+            if scheme == "https" else http.client.HTTPConnection(host, port, timeout=60))
+    sent, last = 0, 0.0
+    try:
+        conn.putrequest("PUT", (parts.path or "/") + (("?" + parts.query) if parts.query else ""))
+        conn.putheader("Content-Type", ctype)
+        for k, v in extra:
+            conn.putheader(k, v)
+        conn.putheader("Content-Length", str(total))
+        conn.endheaders()
+        with open(full, "rb") as f:
+            while True:
+                check_stop(t)
+                block = f.read(CHUNK)
+                if not block:
+                    break
+                conn.send(block)
+                sent += len(block)
+                now = time.monotonic()
+                if now - last > 0.25:
+                    last = now
+                    send({"id": tid, "progress": {"sent": sent, "total": total}})
+        resp = conn.getresponse()
+        body = resp.read(65536)
+    except OSError as e:
+        if not os.path.exists(full):
+            raise Refused("The USB drive was removed.")
+        log("upload failed:", e)
+        raise Refused("LiteOS couldn't be reached to send the file.")
+    finally:
+        conn.close()
+        transfers.pop(tid, None)
+    send({"id": tid, "progress": {"sent": total, "total": total}})
+    return {"status": resp.status, "body": body.decode("utf-8", "replace")}
+
+
+def op_cancel(msg):
+    key = msg.get("transfer")
+    if isinstance(key, str):
+        drop_print(key)                   # a PDF the page was sending to print
+    t = transfers.get(key)
+    if t:
+        t["why"] = "Cancelled."
+        t["ev"].set()
+    # a page-written file that stops: its part goes (write pieces carry the transfer key)
+    if isinstance(key, str) and isinstance(msg.get("device"), str) and isinstance(msg.get("path"), str):
+        try:
+            parent, name, _ = DRIVES.new_path(msg["device"], msg["path"])
+            part = part_for(parent, name, key)
+            if part in DRIVES.parts:
+                os.remove(part)
+                DRIVES.parts.discard(part)
+                DRIVES.settle(msg["device"])  # nothing left half-written there: read-only again
+        except (Refused, OSError):
+            pass
+    return {"done": True}
+
+
+# ---------------------------------------------------------------- printing (print module, H8)
+PRINT_MAX = 100 * 1024 * 1024        # a PDF to print
+prints = {}                          # transfer key -> the PDF being sent in pieces (deleted when done or dropped)
+print_args = {}                      # transfer key -> its lp arguments, checked with the first piece
+print_lock = threading.Lock()
+
+
+def print_dir():
+    """Where PDFs wait for lp: a 0700 folder in the session's own temp folder."""
+    base = os.path.dirname(os.environ.get("LITELINK_SESSION", "")) or "/tmp"
+    path = os.path.join(base if os.path.isdir(base) else "/tmp", "print")
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
+
+
+def drop_prints():
+    with print_lock:
+        paths = list(prints.values())
+        prints.clear()
+    for p in paths:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+
+def printer_options(name):
+    """What a printer offers: {duplex, color, media: [...], mediaDefault} (from the PPD CUPS serves)."""
+    return system.printer_caps(name)
+
+
+def printer_list():
+    result = []
+    for p in system.printers():
+        result.append({"id": p["name"], "name": p["info"], "default": p["default"], "kind": p["kind"],
+                       "state": p["state"], "message": p["message"], **printer_options(p["name"])})
+    return result
+
+
+def op_print_printers(msg):
+    PRINT_JOBS.start()                    # "printers" events from now on
+    return {"printers": printer_list()}
+
+
+def lp_args(printer, options):
+    """The page's options -> lp's arguments (anything the printer can't do is refused)."""
+    if not isinstance(printer, str) or not printer:
+        raise Refused("That request isn't valid.")
+    here = {p["name"]: p for p in system.printers()}
+    if printer not in here:
+        raise Refused("That printer isn't connected any more.")
+    o = options if isinstance(options, dict) else {}
+    caps = printer_options(printer)
+    title = o.get("title") if isinstance(o.get("title"), str) else ""
+    title = "".join(c for c in title if c.isprintable())[:120] or "LiteOS document"
+    args = ["-d", printer, "-t", title]
+    copies = o.get("copies", 1)
+    if type(copies) is not int or not 1 <= copies <= 99:
+        raise Refused("Copies must be a number from 1 to 99.")
+    args += ["-n", str(copies)]
+    pages = o.get("pages")
+    if pages not in (None, ""):
+        if not isinstance(pages, str) or len(pages) > 100 or not __import__("re").fullmatch(r"\d+(-\d+)?(,\d+(-\d+)?)*", pages.replace(" ", "")):
+            raise Refused("Pages must look like 1-3,5.")
+        args += ["-P", pages.replace(" ", "")]
+    duplex = o.get("duplex", "one")
+    sides = {"one": "one-sided", "long": "two-sided-long-edge", "short": "two-sided-short-edge"}.get(duplex)
+    if sides is None:
+        raise Refused("That request isn't valid.")
+    if sides != "one-sided" and not caps["duplex"]:
+        raise Refused("That printer can't print on both sides.")
+    args += ["-o", "sides=" + sides]
+    if "color" in o:
+        if not isinstance(o["color"], bool):
+            raise Refused("That request isn't valid.")
+        if o["color"] and not caps["color"]:
+            raise Refused("That printer can't print in colour.")
+        args += ["-o", "print-color-mode=" + ("color" if o["color"] else "monochrome")]
+    media = o.get("media")
+    if media not in (None, ""):
+        if media not in caps["media"]:
+            raise Refused("That printer doesn't have that paper size.")
+        args += ["-o", "PageSize=" + media]
+    orientation = o.get("orientation")
+    if orientation not in (None, ""):
+        code = {"portrait": "3", "landscape": "4"}.get(orientation)
+        if code is None:
+            raise Refused("That request isn't valid.")
+        args += ["-o", "orientation-requested=" + code]
+    return args
+
+
+def lp(args, path):
+    """Hand a PDF to CUPS. -> the job id ("Office-12")."""
+    try:
+        r = subprocess.run(["lp"] + args + ["--", path], capture_output=True, text=True, timeout=60,
+                           env=dict(os.environ, LC_ALL="C"))
+    except (OSError, subprocess.TimeoutExpired):
+        raise Refused("The document couldn't be sent to the printer.")
+    m = __import__("re").search(r"request id is (\S+)", r.stdout)
+    if r.returncode or not m:
+        if "not accepting" in r.stderr:
+            raise Refused("That printer isn't taking documents right now.")
+        log("lp failed:", r.stderr.strip())
+        raise Refused("The document couldn't be sent to the printer.")
+    return m.group(1)
+
+
+def op_print_submit(msg):
+    """Print a PDF: sent by the page in pieces (transfer, offset, data, final), or fetched
+    from the session's LiteOS (url). The options are checked before anything is sent: once,
+    with the first piece (each check asks CUPS several things; a 20 MB PDF is 40 pieces)."""
+    if isinstance(msg.get("url"), str):
+        return print_from_url(msg, lp_args(msg.get("printer"), msg.get("options")))
+    key, offset, data = msg.get("transfer"), msg.get("offset", 0), msg.get("data", "")
+    final = msg.get("final") is True
+    if not isinstance(key, str) or not key or type(offset) is not int or offset < 0 or not isinstance(data, str):
+        raise Refused("That request isn't valid.")
+    try:
+        chunk = base64.b64decode(data, validate=True)
+    except ValueError:
+        raise Refused("That request isn't valid.")
+    if len(chunk) > READ_CHUNK or offset + len(chunk) > PRINT_MAX:
+        raise Refused("Documents larger than 100 MB can't be printed.")
+    import hashlib
+    path = os.path.join(print_dir(), hashlib.sha1(key.encode()).hexdigest()[:16] + ".pdf")
+    if offset == 0:
+        args = lp_args(msg.get("printer"), msg.get("options"))
+        if not chunk.startswith(b"%PDF-"):
+            raise Refused("Only PDF files can be printed.")
+    with print_lock:
+        if offset == 0:
+            prints[key] = path
+            print_args[key] = args
+            mode = "wb"
+        elif (prints.get(key) != path or key not in print_args or not os.path.exists(path)
+              or os.path.getsize(path) != offset):
+            raise Refused("The document has to be sent from the start again.")
+        else:
+            args = print_args[key]
+            mode = "r+b"
+    try:
+        with open(path, mode) as f:
+            f.seek(offset)
+            f.write(chunk)
+    except OSError:
+        drop_print(key)
+        raise Refused("The document couldn't be kept for printing.")
+    if not final:
+        return {"sent": offset + len(chunk)}
+    try:
+        job = lp(args, path)
+        PRINT_JOBS.add(job, args[args.index("-d") + 1], args[args.index("-t") + 1])
+        return {"sent": offset + len(chunk), "job": job}
+    finally:
+        drop_print(key)
+
+
+def drop_print(key):
+    with print_lock:
+        path = prints.pop(key, None)
+        print_args.pop(key, None)
+    if path:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def print_from_url(msg, args):
+    tid, url = msg["id"], msg["url"]
+    if not SESSION["liteos"] or origin_of(url) != origin_of(SESSION["liteos"]):
+        raise Refused("LiteLink only prints documents from this session's LiteOS.")
+    _, extra = allowed_headers(msg.get("headers") or {})
+    import hashlib
+    path = os.path.join(print_dir(), hashlib.sha1(tid.encode()).hexdigest()[:16] + ".pdf")
+    with print_lock:
+        prints[tid] = path
+    t = start_transfer(tid, None)
+    parts = urllib.parse.urlsplit(url)
+    scheme, host, port = origin_of(url)
+    conn = (http.client.HTTPSConnection(host, port, timeout=60, context=ssl.create_default_context())
+            if scheme == "https" else http.client.HTTPConnection(host, port, timeout=60))
+    received, last = 0, 0.0
+    try:
+        conn.putrequest("GET", (parts.path or "/") + (("?" + parts.query) if parts.query else ""))
+        for k, v in extra:
+            conn.putheader(k, v)
+        conn.endheaders()
+        resp = conn.getresponse()
+        if resp.status != 200:
+            raise Refused(f"LiteOS answered with an error ({resp.status}).")
+        length = resp.getheader("Content-Length")
+        total = int(length) if length and length.isdigit() else None
+        if total is not None and total > PRINT_MAX:
+            raise Refused("Documents larger than 100 MB can't be printed.")
+        try:
+            f = open(path, "wb")
+        except OSError as e:
+            log("print: can't keep the document:", e)
+            raise Refused("The document couldn't be kept for printing.")
+        with f:
+            while True:
+                check_stop(t)
+                try:
+                    block = resp.read1(CHUNK)     # what has arrived: a cancel is seen at once, even on a slow link
+                except (OSError, http.client.HTTPException):
+                    raise Refused("LiteOS couldn't be reached to get the document.")
+                if not block:
+                    break
+                if received == 0 and not block.startswith(b"%PDF-"):
+                    raise Refused("Only PDF files can be printed.")
+                received += len(block)
+                if received > PRINT_MAX:
+                    raise Refused("Documents larger than 100 MB can't be printed.")
+                try:
+                    f.write(block)
+                except OSError as e:          # the device's disk, not the network
+                    log("print: can't keep the document:", e)
+                    raise Refused("The document couldn't be kept for printing.")
+                now = time.monotonic()
+                if now - last > 0.25:
+                    last = now
+                    send({"id": tid, "progress": {"received": received, "total": total}})
+        if not received or (total is not None and received != total):
+            raise Refused("The connection to LiteOS was lost before the document was complete. Try again.")
+        send({"id": tid, "progress": {"received": received, "total": received}})
+        job = lp(args, path)
+        PRINT_JOBS.add(job, msg["printer"], args[args.index("-t") + 1])
+        return {"job": job}
+    except (OSError, http.client.HTTPException) as e:
+        log("print download failed:", e)
+        raise Refused("LiteOS couldn't be reached to get the document.")
+    finally:
+        conn.close()
+        transfers.pop(tid, None)
+        drop_print(tid)
+
+
+# ---------------------------------------------------------------- print jobs and events (H8 P3)
+class PrintJobs:
+    """This session's print jobs (only those, never another session's), their state, and the
+    "printers" / "print-job" events: started when a page first uses printing, polled every 2 s."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.jobs = {}            # job id -> {printer, title, state, message}; finished ones are dropped
+        self.cancelled = set()    # jobs this session cancelled (CUPS lists them as completed, like printed ones)
+        self.printers = None      # the last printers() sent, to send "printers" only on a change
+        self.running = False
+
+    def add(self, job, printer, title):
+        with self.lock:
+            self.jobs[job] = {"job": job, "printer": printer, "title": title, "state": "pending", "message": ""}
+        self.start()
+        # the printer used last is the default (litelink-print, through sudo like Settings)
+        def make_default():
+            try:
+                subprocess.run(["sudo", "-n", "/usr/local/sbin/litelink-print", "default", printer],
+                               capture_output=True, timeout=30)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        threading.Thread(target=make_default, daemon=True).start()
+
+    def start(self):
+        with self.lock:
+            if self.running:
+                return
+            self.running = True
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def list(self):
+        self.refresh(send_events=False)
+        with self.lock:
+            return [dict(j) for j in self.jobs.values()]
+
+    def cancel(self, job):
+        with self.lock:
+            if job not in self.jobs:
+                raise Refused("That document isn't waiting to print any more.")
+        try:
+            r = subprocess.run(["cancel", job], capture_output=True, text=True, timeout=15,
+                               env=dict(os.environ, LC_ALL="C"))
+        except (OSError, subprocess.TimeoutExpired):
+            raise Refused("The document couldn't be cancelled.")
+        if r.returncode:
+            raise Refused("The document couldn't be cancelled.")
+        with self.lock:
+            self.cancelled.add(job)
+        self.refresh()
+
+    def _states(self):
+        """-> ({open job ids}, {printer: (state, message, current job)}), asked over IPP (lpstat
+        takes a second a call: it browses the network for printers)."""
+        jobs = system.print_jobs()
+        if jobs is None:
+            return None, {}
+        current = {j["printer"]: j["job"] for j in jobs if j["state"] == "printing"}
+        states = {p["name"]: [p["state"], p["message"], current.get(p["name"], "")] for p in system.printers()}
+        return {j["job"] for j in jobs}, states
+
+    def refresh(self, send_events=True):
+        # only the jobs known before asking CUPS: one sent while it's being asked isn't in its answer yet
+        # and would look finished
+        with self.lock:
+            known = set(self.jobs)
+        open_ids, states = self._states()
+        if open_ids is None:
+            return
+        changed = []
+        with self.lock:
+            for job, j in list(self.jobs.items()):
+                if job not in known:
+                    continue
+                p = states.get(j["printer"], ["stopped", "The printer isn't set up any more.", ""])
+                if job not in open_ids:
+                    state, message = ("cancelled" if job in self.cancelled else "done"), ""
+                    del self.jobs[job]
+                    self.cancelled.discard(job)
+                elif p[2] == job:
+                    state, message = "printing", p[1]       # why it's waiting, if it is (printer gone)
+                elif p[0] == "stopped":
+                    state, message = "stopped", p[1]
+                elif j["state"] == "printing":      # sent; CUPS waits for the printer to say it's finished
+                    state, message = j["state"], j["message"]
+                else:
+                    state, message = "pending", ""
+                if (state, message) != (j["state"], j["message"]):
+                    j["state"], j["message"] = state, message
+                    changed.append({"job": job, "state": state, "message": message})
+        if send_events:
+            for c in changed:
+                send({"event": "print-job", "data": c})
+
+    def _printers_changed(self):
+        try:
+            now = [(p["name"], p["info"], p["state"], p["message"], p["default"]) for p in system.printers()]
+        except Exception:  # noqa: BLE001
+            return
+        if self.printers is not None and now != self.printers:
+            send({"event": "printers", "data": printer_list()})
+        self.printers = now
+
+    def _loop(self):
+        while True:
+            try:
+                self.refresh()
+                self._printers_changed()
+            except Exception as e:  # noqa: BLE001
+                log("print watch:", e)
+            time.sleep(2)
+
+
+PRINT_JOBS = PrintJobs()
+
+
+def op_print_jobs(msg):
+    return {"jobs": PRINT_JOBS.list()}
+
+
+def op_print_cancel(msg):
+    job = msg.get("job")
+    if not isinstance(job, str) or not job or len(job) > 120:
+        raise Refused("That request isn't valid.")
+    PRINT_JOBS.cancel(job)
+    return {"done": True}
+
+
+# ---------------------------------------------------------------- managing printers (no password, like printing)
+def op_print_find(msg):
+    """Printers found now, over USB and on the network (as Settings › Printers' Add printer lists them)."""
+    ok, found = system.printer_find()
+    if not ok:
+        raise Refused(found)
+    here = system.printers()
+    # set up already: the same address, or the same name (one added by its address is found under its network name)
+    have = {p["uri"] for p in here} | {p["info"] for p in here}
+    return {"printers": [{"uri": f["uri"], "name": f["name"], "kind": f["kind"], "driverless": bool(f["driverless"]),
+                          "added": f["uri"] in have or f["name"] in have}
+                         for f in found if isinstance(f, dict) and f.get("uri")]}
+
+
+def op_print_add(msg):
+    """Set a printer up on this device, as Settings › Printers does: one find() listed, or one by its address
+    ("ipp://office-printer.local", "192.168.1.50"). Driverless printers only."""
+    uri, name = msg.get("uri"), msg.get("name", "")
+    if not isinstance(uri, str) or not uri.strip() or len(uri) > 1024 or not isinstance(name, str) or len(name) > 127:
+        raise Refused("That request isn't valid.")
+    uri, name = uri.strip(), "".join(c for c in name if c.isprintable()).strip()
+    if "://" not in uri:                  # an address alone, as Settings takes it
+        uri = "ipp://" + uri + "/ipp/print"
+    taken = {p["name"] for p in system.printers()}
+    queue = system.printer_name(name or uri.split("://", 1)[1].split("/", 1)[0], taken)
+    ok, out = system.printer_add(queue, uri, name)
+    if not ok:
+        raise Refused(out)
+    added = next((p for p in system.printers() if p["uri"] == uri), None)
+    if added is None:
+        raise Refused("The printer couldn't be set up.")
+    return {"printer": added["name"], "name": added["info"]}
+
+
+def op_print_remove(msg):
+    printer = msg.get("printer")
+    if not isinstance(printer, str) or not printer or len(printer) > 80:
+        raise Refused("That request isn't valid.")
+    if printer not in {p["name"] for p in system.printers()}:
+        raise Refused("That printer isn't set up on this device.")
+    ok, out = system.printer_remove(printer)
+    if not ok:
+        raise Refused(out)
+    return {"done": True}
+
+
+OPS = {"browse": op_browse, "read": op_read, "upload": op_upload, "write": op_write, "download": op_download,
+       "mkdir": op_mkdir, "eject": op_eject, "cancel": op_cancel,
+       "audio.state": op_audio_state, "audio.set": op_audio_set, "network.state": op_network_state,
+       "network.wifi": op_network_wifi, "system.info": op_system_info,
+       "system.lock": op_lock, "session.settings": op_settings, "power.restart": op_power, "power.shutdown": op_power,
+       "bluetooth.state": op_bt_state, "bluetooth.scan": op_bt_scan, "bluetooth.connect": op_bt_connect,
+       "bluetooth.pair": op_bt_pair, "bluetooth.remove": op_bt_remove, "bluetooth.power": op_bt_power,
+       "display.state": op_display_state, "display.set": op_display_set, "input.state": op_input_state,
+       "input.layout": op_input_layout, "time.state": op_time_state, "time.zone": op_time_zone,
+       "print.printers": op_print_printers, "print.submit": op_print_submit,
+       "print.jobs": op_print_jobs, "print.cancel": op_print_cancel,
+       "print.find": op_print_find, "print.add": op_print_add, "print.remove": op_print_remove}
+
+
+def handle(msg):
+    rid = msg.get("id")
+    try:
+        op = msg.get("op")
+        allowed(op)
+        if op == "hello":
+            result = {"version": VERSION, "capabilities": capabilities()}
+        elif op == "list":
+            result = {"devices": DRIVES.list()}
+        else:
+            result = OPS[op](msg)
+        send({"id": rid, "result": result})
+    except Refused as e:
+        send({"id": rid, "error": str(e), **({"code": e.code} if e.code else {})})
+    except Exception as e:  # never leave a request without a reply
+        log("error in", msg.get("op"), repr(e))
+        send({"id": rid, "error": "Something went wrong on the LiteLink device."})
+
+
+def read_message():
+    head = sys.stdin.buffer.read(4)
+    if len(head) < 4:
+        return None
+    size = struct.unpack("=I", head)[0]
+    if size > MAX_MESSAGE:
+        return None                    # not from LiteLink's extension: stop
+    data = sys.stdin.buffer.read(size)
+    try:
+        msg = json.loads(data)
+    except ValueError:
+        return {}
+    return msg if isinstance(msg, dict) else {}
+
+
+def main():
+    # End session stops Chromium's whole process group with SIGTERM, this program
+    # included: leave through SystemExit so the drives are still unmounted below
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(sig, lambda *_: sys.exit(0))
+    if SESSION["usb"] != "off":
+        DRIVES.scan()
+        threading.Thread(target=watch, daemon=True).start()
+    try:
+        while True:
+            msg = read_message()
+            if msg is None:            # Chromium closed (End session, idle reset, crash)
+                break
+            if not isinstance(msg.get("id"), str) or len(msg["id"]) > 80:
+                continue
+            # each request in its own thread, so a cancel gets through during an upload
+            threading.Thread(target=handle, args=(msg,), daemon=True).start()
+    finally:
+        stop_transfers()
+        drop_prints()
+        DRIVES.unmount_all()
+
+
+if __name__ == "__main__":
+    main()

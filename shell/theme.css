@@ -98,6 +98,7 @@ tooltip label { color: #FFFFFF; font-size: 12px; }
 .small { font-size: 12px; }
 .body { font-size: 14px; }
 .field-label { font-size: 13px; font-weight: 500; color: #3F434B; }
+.field-label:disabled { color: #A3A8B0; }
 .optional { font-size: 12px; font-weight: 400; color: #8A8F98; }
 
 entry {
@@ -115,6 +116,8 @@ combobox button { min-height: 38px; border-radius: 8px; border: 1px solid #D5D9E
 .dropdown label { font-size: 14px; color: #16171A; font-weight: 400; }
 .dropdown:hover { border-color: #B9C0CA; background: #FFFFFF; }
 .dropdown:checked { border-color: #2F6FD6; box-shadow: 0 0 0 3px rgba(47, 111, 214, 0.18); background: #FFFFFF; }
+.dropdown:disabled { background: #F5F6F8; border-color: #E2E5EA; }
+.dropdown:disabled label { color: #A3A8B0; }
 popover.dropdown-pop {
   /* No drop shadow: without a compositor GTK draws it as a hard-edged box */
   background-color: #FFFFFF; border: 1px solid #D5D9E0; border-radius: 10px;

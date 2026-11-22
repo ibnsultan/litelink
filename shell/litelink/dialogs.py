@@ -5,8 +5,8 @@ import shutil
 
 from gi.repository import Gdk, GLib, Gtk
 
-from . import system, ui, wifi
-from .config import DEFAULT_CONNECTION, has_credentials, normalize
+from . import system, ui, web, wifi
+from .config import DEFAULT_CONNECTION, address_label, has_credentials, normalize
 
 SETTINGS_GROUPS = [
     ("Connectivity", [("network", "Network", "network"), ("vpn", "VPN", "vpn"),
@@ -34,6 +34,9 @@ DEVICES = [("clipboard", "Clipboard", "Copy and paste between here and the remot
            ("microphone", "Microphone", "Use this device’s microphone remotely"),
            ("usb", "USB storage", "Show USB drives in the remote desktop"),
            ("smartcard", "Smart card", "Sign in with a smart card reader")]
+
+
+LITEOS_HINT = "Lets it use this device’s USB drives, printers, camera and microphone"
 
 
 def field(label_text, widget, optional=False):
@@ -73,10 +76,15 @@ def small_dialog(title):
     return outer, dlg
 
 
-def admin_password_dialog(app, on_ok):
-    """Ask for the admin password (Settings locked in Admin lock)."""
+def admin_password_dialog(app, on_ok, on_cancel=None, message=None, ok_label="Open Settings"):
+    """Ask for the admin password (Settings locked in Admin lock, or LiteOS asking
+    for something that changes the device). on_cancel: closed without the password."""
     outer, dlg = small_dialog("Admin password")
-    dlg.pack_start(ui.label("Enter the admin password to open Settings.", "muted body", wrap=True), False, False, 0)
+    dlg.pack_start(ui.label((message + " " if message else "") +
+                            ("Enter the admin password to allow it." if message else
+                             "Enter the admin password to open Settings."), "muted body", wrap=True),
+                   False, False, 0)
+    state = {"ok": False}
     pw = entry("", "Password", secret=True)
     dlg.pack_start(pw, False, False, 0)
     status = ui.label("", "small")
@@ -84,6 +92,7 @@ def admin_password_dialog(app, on_ok):
 
     def ok(*_):
         if app.cfg.check_lock_password(pw.get_text()):
+            state["ok"] = True
             app.pop_layer()
             on_ok()
         else:
@@ -92,9 +101,9 @@ def admin_password_dialog(app, on_ok):
     pw.connect("activate", ok)
     row = Gtk.Box(spacing=10, halign=Gtk.Align.END)
     row.pack_start(ui.button("Cancel", "btn", app.pop_layer), False, False, 0)
-    row.pack_start(ui.button("Open Settings", "btn btn-primary", ok), False, False, 0)
+    row.pack_start(ui.button(ok_label, "btn btn-primary", ok), False, False, 0)
     dlg.pack_start(row, False, False, 0)
-    app.push_layer(outer, "light")
+    app.push_layer(outer, "light", on_close=lambda: (not state["ok"] and on_cancel and on_cancel()))
     GLib.idle_add(pw.grab_focus)
 
 
@@ -279,7 +288,8 @@ class ConnectionDialog(Gtk.Box):
         ui.make_draggable(self, handle)
 
         stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
-        tabs = Tabs(stack, [("general", "General"), ("display", "Display"), ("devices", "Devices")])
+        tabs = Tabs(stack, [("general", "General"), ("advanced", "Advanced options"),
+                            ("display", "Display"), ("devices", "Devices")])
         tabs.set_margin_start(20)
         tabs.set_margin_end(20)
         tabs.set_margin_top(14)
@@ -305,8 +315,42 @@ class ConnectionDialog(Gtk.Box):
         g.pack_start(field("Protocol", proto), False, False, 0)
 
         self.e_name = entry(c["name"] if not self.is_new else "", "e.g. Office Desktop")
-        self.e_host = entry(c["host"], "Host name or IP address")
+        w = c.get("web", {})
+        # Web kiosk: the address and its port are separate fields; an empty port is
+        # the scheme's own (443 for https, 80 for http)
+        address, inline_port = (web.split_address(c["host"]) if c.get("protocol") == "web" else (c["host"], ""))
+        self.e_host = entry(address, "Host name or IP address")
         self.f_host = field("Host or IP", self.e_host)
+        self.e_port = entry(str(w.get("port") or inline_port), "443")
+        self.e_port.set_width_chars(6)
+        self.f_port = field("Port", self.e_port)
+        self.f_port.set_size_request(120, -1)
+        host_row = Gtk.Box(spacing=16)
+        host_row.pack_start(self.f_host, True, True, 0)
+        host_row.pack_start(self.f_port, False, False, 0)
+        # "This is LiteOS": the admin's choice, ticked by itself when the address
+        # turns out to be LiteOS. Only a ticked connection gets the LiteOS extras
+        # (the device's USB drives, camera, microphone...), whatever a page says.
+        self.c_liteos = Gtk.CheckButton(active=w.get("liteos") is True, valign=Gtk.Align.CENTER)
+        # the line under the title: what it allows, or what the check found
+        self.liteos_hint = ui.label(LITEOS_HINT, "muted small")
+        liteos_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        liteos_text.pack_start(ui.label("This is LiteOS", "body strong"), False, False, 0)
+        liteos_text.pack_start(self.liteos_hint, False, False, 0)
+        self.f_liteos = Gtk.Box(spacing=12, margin_top=6)
+        self.f_liteos.pack_start(liteos_text, True, True, 0)
+        self.f_liteos.pack_end(self.c_liteos, False, False, 0)
+        self._liteos_manual = w.get("liteos") is not None   # decided before: don't change it on open
+        self._liteos_setting = False
+        self._check_gen = 0
+        self._check_timer = 0
+        self.c_liteos.connect("toggled", self._liteos_toggled)
+        self.e_host.connect("changed", self._address_changed)
+        self.e_port.connect("changed", self._address_changed)
+        self.e_host.connect("focus-out-event", self._take_inline_port)
+        host_block = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        host_block.pack_start(host_row, False, False, 0)
+        host_block.pack_start(self.f_liteos, False, False, 0)
         # Both optional: whichever is missing is asked for when connecting
         self.e_user = entry(c["username"], "Ask when connecting")
         self.e_pass = entry(c["password"], "Ask when connecting", secret=True)
@@ -314,18 +358,19 @@ class ConnectionDialog(Gtk.Box):
         self.e_gw = entry(c["gateway"], "gateway.corp.com")
         grid = Gtk.Grid(column_spacing=16, row_spacing=14, column_homogeneous=True)
         grid.attach(field("Name", self.e_name), 0, 0, 2, 1)
-        grid.attach(self.f_host, 0, 1, 2, 1)
+        grid.attach(host_block, 0, 1, 2, 1)
         # RDP only
         self.rdp_fields = [field("Username", self.e_user, optional=True), field("Password", self.e_pass, optional=True),
                            field("Domain", self.e_domain, optional=True), field("RD Gateway", self.e_gw, optional=True)]
         for i, f in enumerate(self.rdp_fields):
             grid.attach(f, i % 2, 2 + i // 2, 1, 1)
-        # Web kiosk only: other sites it may open, reset after a period of no use
-        w = c.get("web", {})
+        # -- Advanced options (Web kiosk): other sites it may open, reset after a period
+        # of no use, VPN. The VPN is on General for RDP and moves here for a Web kiosk.
+        self.adv = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16, margin=20)
         self.e_allowed = entry(w.get("allowed", ""), "e.g. docs.example.com, help.example.com")
         self.f_allowed = field("Other allowed sites", self.e_allowed, optional=True)
         self.f_allowed.pack_start(ui.label("Leave empty to allow any site", "muted small"), False, False, 0)
-        grid.attach(self.f_allowed, 0, 2, 2, 1)
+        self.adv.pack_start(self.f_allowed, False, False, 0)
         # LiteOS and Web kiosk
         self.cb_idle = combo([("0", "Never"), ("2", "After 2 minutes"), ("5", "After 5 minutes"),
                               ("10", "After 10 minutes"), ("30", "After 30 minutes")],
@@ -333,7 +378,21 @@ class ConnectionDialog(Gtk.Box):
         self.f_idle = field("Start over when unused", self.cb_idle)
         self.f_idle.pack_start(ui.label("Signs out of everything and goes back to the start page", "muted small"),
                                False, False, 0)
-        grid.attach(self.f_idle, 0, 3, 2, 1)
+        self.adv.pack_start(self.f_idle, False, False, 0)
+        # LiteOS only: what window.LiteLink may do with USB drives plugged into this device
+        self.cb_usb = combo([("off", "Off"), ("read", "Read only"), ("write", "Read and write")],
+                            w.get("usb") if w.get("usb") in ("off", "read", "write") else "read")
+        self.f_usb = field("USB drives", self.cb_usb)
+        self.f_usb.pack_start(ui.label("What LiteOS may do with USB drives plugged into this device", "muted small"),
+                              False, False, 0)
+        self.adv.pack_start(self.f_usb, False, False, 0)
+        # LiteOS only: printing to this device's printers (window.LiteLink, and Chromium's own printing)
+        self.cb_print = combo([("on", "On"), ("off", "Off")], "off" if w.get("printers") is False else "on")
+        self.f_print = field("Printers", self.cb_print)
+        self.f_print.pack_start(ui.label("Whether LiteOS may print to the printers in Settings › Printers"
+                                         if system.print_engine() else "Printing isn’t installed on this device",
+                                         "muted small"), False, False, 0)
+        self.adv.pack_start(self.f_print, False, False, 0)
         # Private network: a WireGuard tunnel from Settings > VPN, brought up first
         tunnels = system.vpn_list()
         opts = [("", "None")] + [(t["uuid"], t["name"]) for t in tunnels]
@@ -344,6 +403,7 @@ class ConnectionDialog(Gtk.Box):
                                     "Add tunnels in Settings › VPN", "muted small"), False, False, 0)
         if not tunnels:
             self.cb_vpn.set_sensitive(False)
+        self.vpn_box = vpn_box
         grid.attach(vpn_box, 0, 4, 2, 1)
         g.pack_start(grid, False, False, 0)
         self.c_auto = Gtk.CheckButton(label="Connect automatically at startup", active=c["auto"])
@@ -353,7 +413,9 @@ class ConnectionDialog(Gtk.Box):
         g.pack_start(self.c_reconnect, False, False, 0)
         g.pack_start(self.c_keep, False, False, 0)
         stack.add_named(g, "general")
+        stack.add_named(self.adv, "advanced")
         self.grid = grid
+        self.general = g
 
         # -- Display
         d = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16, margin=20)
@@ -411,16 +473,100 @@ class ConnectionDialog(Gtk.Box):
         label.set_text("Address" if web else "Host or IP")
         self.e_host.set_placeholder_text("e.g. liteos.local or https://portal.example.com" if web
                                          else "Host name or IP address")
+        self._move_shared(web)
         shown = [(f, not web) for f in self.rdp_fields] + [
-            (self.f_allowed, key == "web"), (self.f_idle, web), (self.c_keep, web), (self.c_reconnect, not web),
-            # Display and Devices are RDP settings
-            # (only General would be left, so the whole tab row goes)
-            (self.tabs, not web)]
+            (self.f_port, web), (self.f_liteos, web), (self.c_reconnect, not web), (self.c_keep, web),
+            # Advanced options belong to a Web kiosk; Display and Devices are RDP settings
+            (self.tabs.buttons["advanced"], web),
+            (self.tabs.buttons["display"], not web), (self.tabs.buttons["devices"], not web)]
         for w, on in shown:
             w.set_no_show_all(True)        # the layer's show_all() mustn't bring them back
             w.set_visible(on)
+        self.tabs.select("general")
+        self.f_usb.set_sensitive(self.c_liteos.get_active())
+        self.f_print.set_sensitive(self.c_liteos.get_active() and system.print_engine())
         if web:
-            self.tabs.select("general")
+            self._port_placeholder()
+            if not self._liteos_manual and self.e_host.get_text().strip():
+                self._schedule_check(0)
+
+    def _move_shared(self, web):
+        """The VPN: on General for RDP, last under Advanced options for a Web kiosk."""
+        target = self.adv if web else self.grid
+        if self.vpn_box.get_parent() is target:
+            return
+        self.vpn_box.get_parent().remove(self.vpn_box)
+        if web:
+            self.adv.pack_start(self.vpn_box, False, False, 0)
+        else:
+            self.grid.attach(self.vpn_box, 0, 4, 2, 1)
+
+    # ---------------------------------------------------------------- Web kiosk address
+    def _port_placeholder(self):
+        """The port used when the field is empty: the scheme's own."""
+        addr = self.e_host.get_text().strip().lower()
+        self.e_port.set_placeholder_text("80" if addr.startswith("http://") else
+                                         "443" if addr.startswith("https://") else "443 / 80")
+
+    def _take_inline_port(self, *_):
+        """liteos.local:8080 typed in the address: the port moves to its own field."""
+        if self.protocol == "web":
+            addr, port = web.split_address(self.e_host.get_text())
+            if port:
+                self.e_host.set_text(addr)
+                if not self.e_port.get_text().strip():
+                    self.e_port.set_text(port)
+        return False
+
+    def _address_changed(self, *_):
+        if self.protocol != "web":
+            return
+        self._port_placeholder()
+        self._liteos_manual = False          # a new address: look again
+        self._schedule_check(900)
+
+    def _liteos_toggled(self, *_):
+        if not self._liteos_setting:
+            self._liteos_manual = True       # the admin's own choice stands
+        self.f_usb.set_sensitive(self.c_liteos.get_active())   # USB drives and printers are for LiteOS only
+        self.f_print.set_sensitive(self.c_liteos.get_active() and system.print_engine())
+
+    def _set_liteos_status(self, text):
+        self.liteos_hint.set_text(text or LITEOS_HINT)
+
+    def _schedule_check(self, delay_ms):
+        if self._check_timer:
+            GLib.source_remove(self._check_timer)
+        self._check_timer = GLib.timeout_add(delay_ms, self._check_address)
+
+    def _check_address(self):
+        """Ask the address whether it's LiteOS (in the background) and tick the box
+        to match, unless the admin set it themselves."""
+        self._check_timer = 0
+        addr, inline = web.split_address(self.e_host.get_text())
+        port = self.e_port.get_text().strip() or inline
+        self._check_gen += 1
+        gen = self._check_gen
+        if not addr or (port and not (port.isdigit() and 0 < int(port) < 65536)):
+            self._set_liteos_status("")
+            return False
+        self._set_liteos_status("Checking the address…")
+        probe_conn = {"host": addr, "web": {"port": port}}
+        system.in_background(lambda: web.probe(probe_conn, timeout=5), lambda res: self._checked(gen, res))
+        return False
+
+    def _checked(self, gen, res):
+        if gen != self._check_gen:
+            return                            # the address changed meanwhile
+        if not res["ok"]:
+            self._set_liteos_status("Couldn’t reach this address to check")
+            return
+        self._set_liteos_status("Found LiteOS at this address. " + LITEOS_HINT if res["liteos"]
+                                else "No LiteOS at this address")
+        if not self._liteos_manual:
+            self._liteos_setting = True
+            self.c_liteos.set_active(res["liteos"])
+            self._liteos_setting = False
 
     def save(self):
         host = self.e_host.get_text().strip()
@@ -429,12 +575,24 @@ class ConnectionDialog(Gtk.Box):
             self.err.set_markup(f'<span foreground="#C53030">Enter {what}.</span>')
             return
         c = self.conn
+        old_web = c.get("web", {})
+        port = ""
+        if self.protocol == "web":
+            host, inline = web.split_address(host)
+            port = self.e_port.get_text().strip() or inline
+            if port and not (port.isdigit() and 0 < int(port) < 65536):
+                self.err.set_markup('<span foreground="#C53030">Enter a port from 1 to 65535, or leave it empty.</span>')
+                return
         c["protocol"] = self.protocol
-        c["web"] = {"allowed": self.e_allowed.get_text().strip(),
+        c["web"] = {"port": port,
+                    "liteos": self.c_liteos.get_active() if self.protocol == "web" else old_web.get("liteos"),
+                    "usb": self.cb_usb.get_active_id() or "read",
+                    "printers": self.cb_print.get_active_id() != "off",
+                    "allowed": self.e_allowed.get_text().strip(),
                     "idle_minutes": int(self.cb_idle.get_active_id() or 0),
                     "keep_signins": self.c_keep.get_active()}
         c.update({
-            "name": self.e_name.get_text().strip() or host,
+            "name": self.e_name.get_text().strip() or address_label({"protocol": self.protocol, "host": host, "web": {"port": port}}),
             "host": host,
             "username": self.e_user.get_text().strip(),
             "password": self.e_pass.get_text(),
@@ -1385,52 +1543,7 @@ class SettingsWindow(Gtk.Box):
         storage.panel(self, page)
 
     def _confirm_display(self, output, old, new, seconds=15):
-        """'Keep these display settings?' with a countdown. Anything other than
-        Keep changes (timeout, Revert, Esc) restores the previous mode, so a
-        resolution the monitor can't show never leaves a dark screen."""
-        outer, dlg = self._small_dialog("Keep these display settings?")
-        msg = ui.label(f"The resolution changed to {new.replace('x', ' × ')}. If you don’t confirm, "
-                       f"it goes back to {old.replace('x', ' × ')} automatically.", "muted body")
-        msg.set_line_wrap(True)
-        msg.set_max_width_chars(46)
-        dlg.pack_start(msg, False, False, 0)
-        state = {"left": seconds, "timer": None, "done": False}
-
-        def finish(keep):
-            if state["done"]:
-                return
-            state["done"] = True
-            if state["timer"]:
-                GLib.source_remove(state["timer"])
-                state["timer"] = None
-            if not keep:
-                system.set_mode(output, old)
-            else:     # remembered (and re-applied at start) when settings storage exists
-                self.app.cfg.data["display_mode"] = {"output": output, "mode": new}
-                self.app.cfg.save()
-            self.app.pop_layer(entry)
-            self.show("display")
-
-        revert_btn, count = ui.count_button("Revert", "btn", lambda: finish(False))
-        keep_btn = ui.button("Keep changes", "btn btn-primary", lambda: finish(True))
-        row = Gtk.Box(spacing=10, halign=Gtk.Align.END)
-        row.pack_start(revert_btn, False, False, 0)
-        row.pack_start(keep_btn, False, False, 0)
-        dlg.pack_start(row, False, False, 0)
-
-        def tick():
-            count.set_text(str(state["left"]))
-            if state["left"] <= 0:
-                state["timer"] = None
-                finish(False)
-                return False
-            state["left"] -= 1
-            return True
-
-        # Esc / closing the dialog any other way counts as Revert.
-        entry = self.app.push_layer(outer, "light", on_close=lambda: finish(False))
-        tick()
-        state["timer"] = GLib.timeout_add_seconds(1, tick)
+        confirm_display(self.app, output, old, new, on_done=lambda kept: self.show("display"), seconds=seconds)
 
     def _panel_display(self, page):
         outs = system.displays()
@@ -1583,3 +1696,54 @@ class SettingsWindow(Gtk.Box):
         soft.pack_start(col, True, True, 0)
         page.pack_start(soft, False, False, 0)
         page.pack_start(self._kv(info["rows"]), False, False, 0)
+
+
+def confirm_display(app, output, old, new, on_done=None, seconds=15):
+    """'Keep these display settings?' with a countdown. Anything other than
+    Keep changes (timeout, Revert, Esc) restores the previous mode, so a
+    resolution the monitor can't show never leaves a dark screen. Keep saves it
+    (re-applied at start when settings storage exists). on_done(kept)."""
+    outer, dlg = small_dialog("Keep these display settings?")
+    msg = ui.label(f"The resolution changed to {new.replace('x', ' × ')}. If you don\u2019t confirm, "
+                   f"it goes back to {old.replace('x', ' × ')} automatically.", "muted body")
+    msg.set_line_wrap(True)
+    msg.set_max_width_chars(46)
+    dlg.pack_start(msg, False, False, 0)
+    state = {"left": seconds, "timer": None, "done": False, "entry": None}
+
+    def finish(keep):
+        if state["done"]:
+            return
+        state["done"] = True
+        if state["timer"]:
+            GLib.source_remove(state["timer"])
+            state["timer"] = None
+        if not keep:
+            system.set_mode(output, old)
+        else:
+            app.cfg.data["display_mode"] = {"output": output, "mode": new}
+            app.cfg.save()
+        app.pop_layer(state["entry"])
+        if on_done:
+            on_done(keep)
+
+    revert_btn, count = ui.count_button("Revert", "btn", lambda: finish(False))
+    keep_btn = ui.button("Keep changes", "btn btn-primary", lambda: finish(True))
+    row = Gtk.Box(spacing=10, halign=Gtk.Align.END)
+    row.pack_start(revert_btn, False, False, 0)
+    row.pack_start(keep_btn, False, False, 0)
+    dlg.pack_start(row, False, False, 0)
+
+    def tick():
+        count.set_text(str(state["left"]))
+        if state["left"] <= 0:
+            state["timer"] = None
+            finish(False)
+            return False
+        state["left"] -= 1
+        return True
+
+    # Esc / closing the dialog any other way counts as Revert.
+    state["entry"] = app.push_layer(outer, "light", on_close=lambda: finish(False))
+    tick()
+    state["timer"] = GLib.timeout_add_seconds(1, tick)
