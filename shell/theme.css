@@ -46,6 +46,16 @@ label { color: #16171A; }
 /* Settings menu: divider + "Add connection" (last item) */
 .menu-sep { background-color: #ECEEF2; min-height: 1px; margin-left: 16px; margin-right: 16px; }
 label.add-link, .row-btn label.add-link { color: #2659B3; font-weight: 500; }
+/* Settings launcher: a compact menu (flyouts.settings) */
+.menu-card { border-radius: 10px; }
+.menu-row { border: none; background: transparent; box-shadow: none; border-radius: 6px;
+  min-height: 31px; padding: 0 9px; outline-style: none; -gtk-outline-radius: 0; }
+.menu-row:hover { background-color: #EEF3FB; }
+.menu-row label { font-size: 13px; color: #16171A; font-weight: 400; }
+.menu-row label.add-link { color: #2659B3; font-weight: 500; }
+.menu-row:disabled label { color: rgba(43, 46, 52, 0.4); }
+.menu-row:disabled image { opacity: 0.4; }
+.menu-line { background-color: #ECEEF2; min-height: 1px; margin: 4px 8px; }
 .proto-badge {
   background-color: #2F6FD6; border-radius: 5px; padding: 1px 5px;
   color: #FFFFFF; font-size: 9px; font-weight: 600;

@@ -266,36 +266,32 @@ def display(app):
 
 
 def settings(app):
-    card = ui.add_class(Gtk.Box(orientation=Gtk.Orientation.VERTICAL), "card")
-    card.set_size_request(260, -1)
-    head = ui.add_class(Gtk.Box(), "flyout-header")
-    head.pack_start(ui.label("Settings"), False, False, 0)
-    card.pack_start(head, False, False, 0)
-    body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, margin_top=6, margin_bottom=8)
+    """The Settings launcher: a compact menu, every page with its icon, groups split by a line
+    (no headings), Add connection last."""
+    card = ui.add_class(Gtk.Box(orientation=Gtk.Orientation.VERTICAL), "card", "menu-card")
+    card.set_size_request(214, -1)
+    body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, margin_top=5, margin_bottom=5,
+                   margin_start=5, margin_end=5)
     from .dialogs import READY_PANELS, SETTINGS_GROUPS
-    for title, items in SETTINGS_GROUPS:
-        g = ui.label(title.upper(), "group-title")
-        g.set_margin_start(16)
-        g.set_margin_top(10)
-        g.set_margin_bottom(4)
-        body.pack_start(g, False, False, 0)
-        for key, text, _icon in items:
-            b = ui.add_class(Gtk.Button(), "row-btn")
-            lb = ui.label(text)
-            b.add(lb)
-            b.connect("clicked", lambda _b, k=key: app.open_settings(k))
-            if key not in READY_PANELS:
-                b.set_sensitive(False)
-            body.pack_start(b, False, False, 0)
+
+    def item(icon, text, cb, cls="", colour="#3F434B", sensitive=True):
+        b = ui.add_class(Gtk.Button(), "menu-row")
+        row = Gtk.Box(spacing=10)
+        row.pack_start(ui.icon(icon, 16, colour, 1.9), False, False, 0)
+        row.pack_start(ui.label(text, cls), False, False, 0)
+        b.add(row)
+        b.connect("clicked", lambda *_: cb())
+        b.set_sensitive(sensitive)
+        body.pack_start(b, False, False, 0)
+
+    for gi, (_title, items) in enumerate(SETTINGS_GROUPS):
+        if gi:
+            body.pack_start(ui.add_class(Gtk.Box(), "menu-line"), False, False, 0)
+        for key, text, icon in items:
+            item(icon, text, lambda k=key: app.open_settings(k), sensitive=key in READY_PANELS)
     # Last item: new connections are added here (the desktop only lists real ones)
-    body.pack_start(ui.add_class(Gtk.Box(margin_top=6, margin_bottom=6), "menu-sep"), False, False, 0)
-    add = ui.add_class(Gtk.Button(), "row-btn")
-    row = Gtk.Box(spacing=10)
-    row.pack_start(ui.icon("plus", 16, "#2659B3", 2.2), False, False, 0)
-    row.pack_start(ui.label("Add connection", "add-link"), False, False, 0)
-    add.add(row)
-    add.connect("clicked", lambda *_: app.edit_connection(None))
-    body.pack_start(add, False, False, 0)
-    # 14 px above the card, 40 below it (shadow room), ~50 for the header
-    card.pack_start(_fit(body, 14 + 40 + 50), False, False, 0)
+    body.pack_start(ui.add_class(Gtk.Box(), "menu-line"), False, False, 0)
+    item("plus", "Add connection", lambda: app.edit_connection(None), "add-link", "#2659B3")
+    # 14 px above the card, 40 below it (shadow room)
+    card.pack_start(_fit(body, 14 + 40 + 10), False, False, 0)
     return card, -14          # negative = anchored to the top (opened from the kite button)
