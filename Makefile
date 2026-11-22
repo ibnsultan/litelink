@@ -31,6 +31,10 @@ iso: branding shell
 	chmod +x $(BUILD)/auto/* $(BUILD)/config/hooks/normal/*.hook.chroot $(BUILD)/config/hooks/normal/*.hook.binary \
 		$(BUILD)/config/includes.chroot/usr/local/bin/* $(BUILD)/config/includes.chroot/usr/local/sbin/* \
 		$(SHELL_DST)/main.py
+	# Scripts edited on Windows may carry CRLF line ends: "#!/usr/bin/python3\r" can't be run
+	find $(BUILD)/auto $(BUILD)/config/hooks/normal $(BUILD)/config/includes.chroot/usr/local/bin \
+		$(BUILD)/config/includes.chroot/usr/local/sbin $(SHELL_DST)/main.py -maxdepth 1 -type f \
+		-exec sed -i 's/\r$$//' {} +
 	cd $(BUILD) && lb clean && lb config && lb build
 	mkdir -p $(OUT)
 	cp $(ISO_SRC) $(ISO)
