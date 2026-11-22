@@ -634,6 +634,9 @@ class Shell(Gtk.Window):
 
     def autostart(self):
         self._restore_display()
+        # Settings › Certificates: the root helper's copies live in RAM (/etc, live system)
+        if system.ca_list():
+            system.in_background(system.ca_apply, lambda _ok: None)
         self._start_input()
         if self.cfg.data.get("auto_timezone"):
             self._auto_timezone_retry(tries=10)

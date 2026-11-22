@@ -1,5 +1,6 @@
 """Thin wrappers around system tools: NetworkManager, PipeWire, xrandr, power."""
 import glob
+import json
 import os
 import platform
 import re
@@ -1200,6 +1201,236 @@ def _read(path):
         return ""
 
 
+def print_engine():
+    """The print system (CUPS) is on this device. It's an image module
+    (print.squashfs): always on the USB stick, on an installed disk only when
+    Printers was ticked in the installer."""
+    return os.path.exists("/usr/sbin/cupsd")
+
+
+# CUPS is asked over IPP (its own protocol, on localhost:631), not with lpstat / lpoptions: those list
+# destinations through libcups, which also browses the network for printers for about a second on
+# every call; a direct request takes a few milliseconds.
+_IPP_TEXT = range(0x30, 0x50)        # text, name, keyword, uri, charset, language, mime type
+
+
+def _ipp(op, attrs=(), uri="ipp://localhost/", path="/"):
+    """One IPP request to CUPS. attrs: [(value tag, name, value or [values])].
+    -> [{name: value or [values]}] for the printer / job groups of the answer (None if CUPS can't be asked)."""
+    import http.client
+    import struct
+
+    def attr(tag, name, value):
+        out = b""
+        for i, v in enumerate(value if isinstance(value, list) else [value]):
+            v = v.encode() if isinstance(v, str) else v
+            n = name.encode() if i == 0 else b""
+            out += struct.pack(">BH", tag, len(n)) + n + struct.pack(">H", len(v)) + v
+        return out
+    body = struct.pack(">BBHI", 2, 0, op, 1) + b"\x01"
+    body += attr(0x47, "attributes-charset", "utf-8") + attr(0x48, "attributes-natural-language", "en")
+    body += attr(0x45, "printer-uri", uri)
+    for tag, name, value in attrs:
+        body += attr(tag, name, value)
+    body += b"\x03"
+    try:
+        conn = http.client.HTTPConnection("localhost", 631, timeout=5)
+        conn.request("POST", path, body, {"Content-Type": "application/ipp"})
+        data = conn.getresponse().read()
+        conn.close()
+    except (OSError, http.client.HTTPException):
+        return None
+    if len(data) < 8:
+        return None
+    if struct.unpack(">H", data[2:4])[0] >= 0x0400:      # a client or server error (no printers: not found)
+        return []
+    groups, cur, last, i = [], None, None, 8
+    try:
+        while i < len(data):
+            tag = data[i]
+            i += 1
+            if tag == 0x03:
+                break
+            if tag < 0x10:                                   # a new group: printers (4) and jobs (2) are kept
+                cur = {} if tag in (0x02, 0x04) else None
+                if cur is not None:
+                    groups.append(cur)
+                continue
+            nlen = struct.unpack(">H", data[i:i + 2])[0]
+            name = data[i + 2:i + 2 + nlen].decode(errors="replace")
+            i += 2 + nlen
+            vlen = struct.unpack(">H", data[i:i + 2])[0]
+            raw = data[i + 2:i + 2 + vlen]
+            i += 2 + vlen
+            if tag in (0x21, 0x23) and vlen == 4:            # integer, enum
+                value = struct.unpack(">i", raw)[0]
+            elif tag == 0x22:                                # boolean
+                value = raw == b"\x01"
+            elif tag in _IPP_TEXT:
+                value = raw.decode(errors="replace")
+            else:
+                value = raw
+            if cur is None:
+                continue
+            if nlen:
+                last = name
+                cur[name] = value
+            elif last in cur:                                # another value of the same attribute
+                cur[last] = (cur[last] if isinstance(cur[last], list) else [cur[last]]) + [value]
+    except (IndexError, struct.error):
+        pass
+    return groups
+
+
+def _listed(v):
+    return v if isinstance(v, list) else [] if v is None else [v]
+
+
+def _printer_message(p, state):
+    """What CUPS says about a printer, as a sentence: its message (when it says something), else its
+    alerts ("media-empty-error" -> "Media empty"). "Idle." / "Ready to print." linger from before a
+    job, and CUPS's own reasons (cups-waiting-for-job-completed) say nothing."""
+    text = (p.get("printer-state-message") or "").strip()
+    if state != "idle" and text and text not in ("Idle.", "Ready to print."):
+        return text
+    reasons = [r for r in _listed(p.get("printer-state-reasons"))
+               if isinstance(r, str) and r != "none" and not r.startswith("cups-")]
+    words = [re.sub(r"-(error|warning|report)$", "", r).replace("-", " ") for r in reasons]
+    return ", ".join(words).capitalize()
+
+
+def printers():
+    """Printers set up on this device (Settings › Printers), from CUPS:
+    -> [dict(name, info, uri, kind 'usb'|'network', state 'idle'|'printing'|'stopped', message, default)]."""
+    got = _ipp(0x4002, [(0x44, "requested-attributes",
+                         ["printer-name", "printer-info", "printer-state", "printer-state-message",
+                          "printer-state-reasons", "device-uri"])]) or []
+    default = next((g.get("printer-name") for g in _ipp(0x4001) or []), None)
+    found = []
+    for g in got:
+        name = g.get("printer-name")
+        if not isinstance(name, str) or "@" in name:       # another computer's printer (name@host), not set up here
+            continue
+        state = {4: "printing", 5: "stopped"}.get(g.get("printer-state"), "idle")
+        uri = g.get("device-uri") if isinstance(g.get("device-uri"), str) else ""
+        found.append({"name": name, "info": (g.get("printer-info") or "").strip() or name, "uri": uri,
+                      "kind": "usb" if _usb_uri(uri) else "network", "state": state,
+                      "message": _printer_message(g, state), "default": name == default})
+    # by name: the default changes with every print (the printer used last), rows mustn't jump
+    return sorted(found, key=lambda p: p["info"].lower())
+
+
+def print_jobs():
+    """Documents not finished yet, any session's: -> [dict(job 'Printer-12', printer, state
+    'pending'|'printing'|'stopped')], or None if CUPS can't be asked."""
+    got = _ipp(0x000A, [(0x44, "which-jobs", "not-completed"),
+                        (0x44, "requested-attributes", ["job-id", "job-state", "job-printer-uri"])])
+    if got is None:
+        return None
+    jobs = []
+    for g in got:
+        printer = (g.get("job-printer-uri") or "").rstrip("/").rsplit("/", 1)[-1]
+        if isinstance(g.get("job-id"), int) and printer:
+            jobs.append({"job": f"{printer}-{g['job-id']}", "printer": printer,
+                         "state": {5: "printing", 4: "stopped", 6: "stopped"}.get(g.get("job-state"), "pending")})
+    return jobs
+
+
+def printer_caps(name):
+    """What a printer offers, from the description CUPS keeps for it (its PPD, served on localhost):
+    -> {duplex, color, media: [...], mediaDefault}."""
+    import urllib.parse
+    import urllib.request
+    try:
+        with urllib.request.urlopen("http://localhost:631/printers/%s.ppd" % urllib.parse.quote(name),
+                                    timeout=5) as r:
+            ppd = r.read(512 * 1024).decode("utf-8", "replace")
+    except (OSError, ValueError):
+        ppd = ""
+
+    def choices(key):
+        return re.findall(r"(?m)^\*%s ([^\s/:]+)" % key, ppd)
+
+    def default(key):
+        m = re.search(r"(?m)^\*Default%s: (\S+)" % key, ppd)
+        return m.group(1) if m else ""
+    sizes = [x for x in choices("PageSize") if not x.startswith("Custom")]
+    colour = choices("ColorModel") + choices("print-color-mode")
+    media_default = default("PageSize")
+    return {"duplex": any(c.startswith("Duplex") for c in choices("Duplex")),
+            "color": any(c.lower() not in ("gray", "grey", "monochrome", "black", "kgray", "bi-level")
+                         for c in colour),
+            "media": sizes[:40], "mediaDefault": "" if media_default.startswith("Custom") else media_default}
+
+
+def _usb_uri(uri):
+    """A USB printer: usb://, or one ipp-usb serves on this device (localhost, ports 60000-60099)."""
+    return uri.startswith("usb:") or bool(re.match(r"ipps?://(localhost|127\.0\.0\.1):600\d\d/", uri))
+
+
+def _print_helper(args, timeout=120):
+    """-> (ok, stdout or the helper's sentence)."""
+    try:
+        r = subprocess.run(["sudo", "-n", "/usr/local/sbin/litelink-print"] + args, capture_output=True, text=True,
+                           timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return False, "The printer didn’t answer in time."
+    if r.returncode:
+        return False, (r.stderr.strip().splitlines() or ["Something went wrong with the printer."])[-1]
+    return True, r.stdout
+
+
+def printer_find():
+    """Printers found now (USB and network). -> (ok, [dict(uri, name, kind, driverless)] or message)."""
+    ok, out = _print_helper(["find"], timeout=60)
+    if not ok:
+        return False, out
+    try:
+        return True, json.loads(out or "[]")
+    except ValueError:
+        return False, "Couldn’t look for printers."
+
+
+def printer_name(info, taken=()):
+    """A CUPS queue name from a printer's name: letters, digits, _ . - only, not one already used."""
+    base = re.sub(r"[^A-Za-z0-9_.-]+", "_", info).strip("_.-")[:56] or "Printer"
+    name, n = base, 2
+    while name in taken:
+        name, n = f"{base}_{n}", n + 1
+    return name
+
+
+def printer_add(name, uri, info=""):
+    """-> (ok, the name it's shown under, or the helper's sentence). Without info (added by address)
+    the helper names it after the printer's own model."""
+    ok, out = _print_helper(["add", name, uri] + ([info] if info else []))
+    if not ok:
+        return False, out
+    try:
+        return True, json.loads(out).get("info") or info or name
+    except ValueError:
+        return True, info or name
+
+
+def printer_remove(name):
+    return _print_helper(["remove", name], timeout=30)
+
+
+def printer_default(name):
+    return _print_helper(["default", name], timeout=30)
+
+
+def printer_last():
+    """The printer used last becomes the default (run when a web session ends: that catches
+    Chromium's own print dialog, which the device bridge doesn't see)."""
+    return _print_helper(["last"], timeout=30)
+
+
+def printer_test(name):
+    ok, out = _print_helper(["test", name], timeout=30)
+    return ok, ("" if ok else out)
+
+
 def web_engine():
     """The browser engine (Chromium) is on this device. It's an image module
     (web.squashfs): always on the USB stick, on an installed disk only when Web
@@ -1245,3 +1476,101 @@ def about():
 
 def have(tool):
     return shutil.which(tool) is not None
+
+
+# ---------------------------------------------------------------- certificates (Settings › Certificates)
+CA_DIR = os.path.expanduser("~/.config/litelink/certs/ca")     # kept with the settings
+
+
+def _decode_cert(pem):
+    """PEM text -> dict(subject, issuer, expires, fingerprint) or None."""
+    import hashlib
+    import ssl
+    import tempfile
+    try:
+        der = ssl.PEM_cert_to_DER_cert(pem)
+        with tempfile.NamedTemporaryFile("w", suffix=".pem") as f:
+            f.write(ssl.DER_cert_to_PEM_cert(der))
+            f.flush()
+            info = ssl._ssl._test_decode_cert(f.name)
+    except (ValueError, ssl.SSLError, OSError):
+        return None
+
+    def name(rdns):
+        parts = dict(x[0] for x in rdns)
+        return parts.get("commonName") or parts.get("organizationName") or parts.get("organizationalUnitName") or ""
+    return {"subject": name(info.get("subject", ())), "issuer": name(info.get("issuer", ())),
+            "expires": info.get("notAfter", ""), "fingerprint": hashlib.sha256(der).hexdigest()}
+
+
+def ca_list():
+    """The certificate authorities added in Settings: [dict(subject, issuer, expires, fingerprint, path)]."""
+    out = []
+    try:
+        names = sorted(os.listdir(CA_DIR))
+    except OSError:
+        return out
+    for n in names:
+        path = os.path.join(CA_DIR, n)
+        try:
+            info = _decode_cert(open(path).read())
+        except OSError:
+            info = None
+        if info:
+            out.append(dict(info, path=path))
+    return out
+
+
+def ca_add(src):
+    """A .pem / .crt / .cer / .der file -> (ok, message). Kept as PEM, named by its fingerprint."""
+    import ssl
+    try:
+        raw = open(src, "rb").read(200000)
+    except OSError:
+        return False, "The file couldn\u2019t be read."
+    text = raw.decode("ascii", "ignore")
+    pems = re.findall(r"-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----", text, re.S)
+    if not pems:
+        try:
+            pems = [ssl.DER_cert_to_PEM_cert(raw)]           # a binary (DER) certificate
+        except ValueError:
+            pems = []
+    added = 0
+    for pem in pems:
+        info = _decode_cert(pem)
+        if not info:
+            continue
+        os.makedirs(CA_DIR, mode=0o700, exist_ok=True)
+        with open(os.path.join(CA_DIR, info["fingerprint"][:32] + ".pem"), "w") as f:
+            f.write(pem.strip() + "\n")
+        added += 1
+    if not added:
+        return False, "That file isn\u2019t a certificate (a private key or a .p12 / .pfx bundle can\u2019t be added here)."
+    return ca_apply(), ""
+
+
+def ca_remove(fingerprint):
+    for c in ca_list():
+        if c["fingerprint"] == fingerprint:
+            try:
+                os.remove(c["path"])
+            except OSError:
+                pass
+    return ca_apply()
+
+
+def ca_apply():
+    """Hand the added certificates to the root helper (Chromium policy + system store)."""
+    import json
+    pems = []
+    for c in ca_list():
+        try:
+            pems.append(open(c["path"]).read())
+        except OSError:
+            pass
+    try:
+        r = subprocess.run(["sudo", "-n", "/usr/local/sbin/litelink-web", "certs"], input=json.dumps(pems),
+                           capture_output=True, text=True, timeout=60)
+        return r.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False

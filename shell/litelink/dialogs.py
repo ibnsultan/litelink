@@ -11,17 +11,20 @@ from .config import DEFAULT_CONNECTION, has_credentials, normalize
 SETTINGS_GROUPS = [
     ("Connectivity", [("network", "Network", "network"), ("vpn", "VPN", "vpn"),
                       ("bluetooth", "Bluetooth", "bluetooth"), ("remote", "Connections", "remote")]),
+    # Printers only where the print module is installed (what isn't installed isn't listed)
     ("Device", [("display", "Display", "display"), ("keyboard", "Keyboard & input", "keyboard"),
-                ("sound", "Sound", "sound"), ("time", "Time & region", "time")]),
+                ("sound", "Sound", "sound")] + ([("printers", "Printers", "printer")] if system.print_engine() else [])
+     + [("time", "Time & region", "time")]),
     # Before installing this is where you install; afterwards it's settings storage
     ("System", [("mode", "System", "monitor"),
                 ("storage", "Storage" if system.is_installed() else "Install", "storage"),
-                ("diag", "Diagnostics", "diag"), ("about", "About", "system")]),
+                ("certs", "Certificates", "shield"), ("diag", "Diagnostics", "diag"),
+                ("about", "About", "system")]),
 ]
 
 # Settings panels that exist today; the others are shown disabled until built.
 READY_PANELS = {"network", "vpn", "bluetooth", "remote", "display", "keyboard", "sound", "time",
-                "mode", "storage", "about", "diag"}
+                "mode", "storage", "about", "diag", "certs", "printers"}
 
 RESOLUTIONS = [("fullscreen", "Full screen (match monitor)"), ("1920x1080", "1920 × 1080"),
                ("1600x900", "1600 × 900"), ("1280x800", "1280 × 800"), ("1024x768", "1024 × 768")]
@@ -1032,6 +1035,14 @@ class SettingsWindow(Gtk.Box):
         from . import panels
         panels.connections(self, page)
 
+    def _panel_certs(self, page):
+        from . import panels
+        panels.certificates(self, page)
+
+    def _panel_printers(self, page):
+        from . import panels
+        panels.printers(self, page)
+
     def _panel_diag(self, page):
         from . import panels
         panels.diagnostics(self, page)
@@ -1303,7 +1314,7 @@ class SettingsWindow(Gtk.Box):
         self._dialog_buttons(dlg, save)
         self.app.push_layer(outer, "light")
 
-    def _pick_cert(self, on_pick):
+    def _pick_cert(self, on_pick, suffixes=(".pem", ".crt", ".cer", ".der", ".key", ".p12", ".pfx")):
         """Certificate and key files from a USB drive, copied into LiteLink's
         settings (kept across reboots) so the drive can be removed afterwards."""
         outer, dlg = self._small_dialog("Choose a file from a USB drive")
@@ -1316,7 +1327,6 @@ class SettingsWindow(Gtk.Box):
         row.pack_start(ui.button("Cancel", "btn", self.app.pop_layer), False, False, 0)
         dlg.pack_start(row, False, False, 0)
         self.app.push_layer(outer, "light")
-        suffixes = (".pem", ".crt", ".cer", ".der", ".key", ".p12", ".pfx")
 
         def work():
             found = []
@@ -1345,8 +1355,8 @@ class SettingsWindow(Gtk.Box):
             if lst.get_ancestor(Gtk.Window) is None:
                 return
             if not found:
-                msg.set_text("No certificate files found. Plug in a USB drive with a .pem, .crt, .cer, "
-                             ".der, .key, .p12 or .pfx file.")
+                msg.set_text("No certificate files found. Plug in a USB drive with a "
+                             + ", ".join(suffixes[:-1]) + " or " + suffixes[-1] + " file.")
                 return
             msg.set_text("Certificate and key files on your USB drives:")
             for i, (path, where) in enumerate(found):

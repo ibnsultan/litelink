@@ -2,6 +2,7 @@
 
 Each panel(settings, page) fills the page of the Settings window (settings is
 the SettingsWindow: its list helpers, header and show())."""
+import os
 import time
 
 from gi.repository import GLib, Gtk
@@ -524,3 +525,280 @@ def save_report(win, results):
             drives.pack_start(r, False, False, 0)
         drives.show_all()
     system.in_background(system.media_list, listed)
+
+
+# ============================================================== Certificates
+def certificates(win, page):
+    """Settings › Certificates: certificate authorities of the organisation's own
+    (a LiteOS server on the LAN with its own certificate, a company CA). Web
+    sessions and the device bridge trust sites they signed; the list is kept with
+    the settings and applied at every start."""
+    app = win.app
+    add = ui.button("Add certificate", "btn", lambda: pick())
+    win.set_header("Certificate authorities this device trusts besides the usual public ones, for web "
+                   "connections such as a LiteOS server on your network.", add)
+    status = ui.label("", "small")
+    error, win._certs_error = getattr(win, "_certs_error", ""), ""
+    if error:
+        status.set_markup('<span foreground="#C53030">%s</span>' % GLib.markup_escape_text(error))
+    certs = system.ca_list()
+    if not certs:
+        from .vpn import empty_state
+        page.pack_start(empty_state("shield", "No certificates",
+                                    "Add the certificate file from your IT team, from a USB drive "
+                                    "(.pem, .crt, .cer or .der)."), True, True, 0)
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+    page.pack_start(box, False, False, 0)
+    buttons = [add]
+    for i, c in enumerate(certs):
+        row = ui.add_class(Gtk.Box(spacing=12), "device-row")
+        if i < len(certs) - 1:
+            ui.add_class(row, "device-row-sep")
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3, valign=Gtk.Align.CENTER)
+        col.pack_start(ui.label(c["subject"] or "Unnamed certificate", "strong body"), False, False, 0)
+        bits = []
+        if c["issuer"] and c["issuer"] != c["subject"]:
+            bits.append(f"Issued by {c['issuer']}")
+        if c["expires"]:
+            bits.append(f"Expires {' '.join(c['expires'].split()[:2] + c['expires'].split()[3:4])}")
+        sub = ui.label(" · ".join(bits) or "Certificate authority", "muted small")
+        sub.set_ellipsize(3)
+        sub.set_tooltip_text("SHA-256 " + ":".join(c["fingerprint"][j:j + 2] for j in range(0, 64, 2)).upper())
+        col.pack_start(sub, False, False, 0)
+        row.pack_start(col, True, True, 0)
+        rm = ui.button("Remove", "btn")
+        rm.connect("clicked", lambda b, fp=c["fingerprint"]: remove(fp, b))
+        rm.set_valign(Gtk.Align.CENTER)
+        row.pack_start(rm, False, False, 0)
+        buttons.append(rm)
+        box.pack_start(row, False, False, 0)
+    page.pack_start(status, False, False, 0)
+
+    def busy(button, text):
+        """Applying takes several seconds (the device's certificate stores are rebuilt): the button that
+        started it says so with a spinner, and nothing else can be started until the page refreshes."""
+        for b in buttons:
+            b.set_sensitive(False)
+        button.set_size_request(button.get_allocated_width(), -1)   # same width: nothing beside it moves
+        inner = button.get_child()
+        for ch in inner.get_children():
+            inner.remove(ch)
+        spin = Gtk.Spinner(active=True)
+        spin.set_size_request(14, 14)
+        inner.pack_start(spin, False, False, 0)
+        inner.pack_start(Gtk.Label(label=text), False, False, 0)
+        inner.show_all()
+
+    def done(ok, message=""):
+        if _gone(page):
+            return
+        # the list always shows what's kept; a failure is said on the refreshed page
+        win._certs_error = "" if ok else (message or "The certificates couldn\u2019t be applied to this device.")
+        win.show("certs")
+
+    def pick():
+        def chosen(path):
+            def work():
+                ok, message = system.ca_add(path)
+                try:
+                    os.remove(path)         # the copy the picker made; the certificate is kept as PEM
+                except OSError:
+                    pass
+                return ok, message
+            busy(add, "Adding…")
+            system.in_background(work, lambda r: done(*r))
+        win._pick_cert(chosen, suffixes=(".pem", ".crt", ".cer", ".der"))
+
+    def remove(fp, button):
+        busy(button, "Removing…")
+        system.in_background(lambda: system.ca_remove(fp), lambda ok: done(ok))
+
+
+# ============================================================== Printers
+def printers(win, page):
+    """Settings › Printers (print image module): the printers this device prints
+    to, for LiteOS sessions where the connection allows printing. Driverless
+    printers only (IPP Everywhere / AirPrint), over USB or the network; CUPS
+    describes each one from the printer itself, so nothing is installed for it."""
+    app = win.app
+    add = ui.button("Add printer", "btn", lambda: add_dialog())
+    win.set_header("Printers this device can print to, plugged in by USB or on your network.", add)
+    status = ui.label("", "small")
+    note, win._printers_note = getattr(win, "_printers_note", ("", True)), ("", True)
+    if note[0]:
+        colour = "#5A606B" if note[1] else "#C53030"
+        status.set_markup('<span foreground="%s">%s</span>' % (colour, GLib.markup_escape_text(note[0])))
+    found = system.printers()
+    if not found:
+        from .vpn import empty_state
+        page.pack_start(empty_state("printer", "No printers yet",
+                                    "Add a printer that’s plugged into this device or on your network."),
+                        True, True, 0)
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+    page.pack_start(box, False, False, 0)
+    for i, p in enumerate(found):
+        row = ui.add_class(Gtk.Box(spacing=14), "device-row")
+        if i < len(found) - 1:
+            ui.add_class(row, "device-row-sep")
+        glyph = ui.icon("printer", 22, "#5A606B", 1.8)
+        glyph.set_valign(Gtk.Align.CENTER)
+        row.pack_start(glyph, False, False, 0)
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3, valign=Gtk.Align.CENTER)
+        col.pack_start(ui.label(p["info"], "strong body"), False, False, 0)
+        state = {"idle": "Ready", "printing": "Printing", "stopped": "Stopped"}[p["state"]]
+        if p["state"] == "stopped" and p["message"]:
+            state += ": " + p["message"]
+        bits = ["USB" if p["kind"] == "usb" else "Network", state] + (["Default"] if p["default"] else [])
+        sub = ui.label(" · ".join(bits), "muted small")
+        sub.set_ellipsize(3)
+        sub.set_tooltip_text(p["uri"])
+        col.pack_start(sub, False, False, 0)
+        row.pack_start(col, True, True, 0)
+        # icon actions; no default button: the printer used last is the default
+        acts = Gtk.Box(spacing=2, valign=Gtk.Align.CENTER)
+        for icon, colour, tip, cb in (("testpage", "#3F434B", "Print test page", lambda n=p["name"]: test(n)),
+                                      ("trash", "#C53030", "Remove",
+                                       lambda n=p["name"]: act(lambda: system.printer_remove(n)))):
+            b = ui.add_class(Gtk.Button(), "icon-btn", "row-icon-btn")
+            b.set_size_request(36, 36)
+            b.add(ui.icon(icon, 18, colour, 1.8))
+            b.set_tooltip_text(tip)
+            b.get_accessible().set_name(tip)
+            b.connect("clicked", lambda _b, c=cb: c())
+            acts.pack_start(b, False, False, 0)
+        row.pack_start(acts, False, False, 0)
+        box.pack_start(row, False, False, 0)
+    page.pack_start(status, False, False, 0)
+
+    def refresh(message="", good=True):
+        if _gone(page):
+            return
+        win._printers_note = (message, good)
+        win.show("printers")
+
+    def act(work):
+        system.in_background(work, lambda r: refresh("" if r[0] else r[1], r[0]))
+
+    def test(name):
+        system.in_background(lambda: system.printer_test(name), lambda r: refresh("" if r[0] else r[1], r[0]))
+
+    def add_dialog():
+        outer, dlg = win._small_dialog("Add a printer")
+        outer.set_size_request(500, -1)
+        hint = ui.label("Turn the printer on and connect it to this device or your network. Printers that work "
+                        "without a driver (most printers made since 2015) can be added.", "muted small", wrap=True)
+        dlg.pack_start(hint, False, False, 0)
+        listing = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        listing.set_size_request(-1, 150)
+
+        def state(title, text, busy=False):
+            """The list's empty state: searching (a spinner) or nothing found, centred in the list."""
+            for ch in listing.get_children():
+                listing.remove(ch)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, halign=Gtk.Align.CENTER,
+                          valign=Gtk.Align.CENTER)
+            if busy:
+                spin = Gtk.Spinner(active=True)
+                spin.set_size_request(28, 28)
+                lead = spin
+            else:
+                lead = ui.icon("printer", 40, "#B8BEC8", 1.4)
+            lead.set_margin_bottom(4)
+            box.pack_start(lead, False, False, 0)
+            box.pack_start(ui.label(title, "strong body", xalign=0.5), False, False, 0)
+            if text:
+                sub = ui.label(text, "muted small", xalign=0.5, wrap=True)
+                sub.set_max_width_chars(52)
+                sub.set_justify(Gtk.Justification.CENTER)
+                box.pack_start(sub, False, False, 0)
+            listing.pack_start(box, True, True, 0)
+            listing.show_all()
+        dlg.pack_start(listing, False, False, 0)
+        dlg.pack_start(ui.label("Or add it by address", "field-label"), False, False, 0)
+        by = Gtk.Box(spacing=8)
+        addr = Gtk.Entry(placeholder_text="ipp://printer-name.local or ipps://192.168.1.50")
+        by.pack_start(addr, True, True, 0)
+        by.pack_start(ui.button("Add", "btn", lambda: add_uri(addr.get_text().strip(), "")), False, False, 0)
+        dlg.pack_start(by, False, False, 0)
+        msg = ui.label("", "small", wrap=True)
+        dlg.pack_start(msg, False, False, 0)
+        again = ui.button("Search again", "btn", lambda: search())
+        foot = Gtk.Box(spacing=10)
+        foot.pack_start(again, False, False, 0)
+        foot.pack_start(Gtk.Box(), True, True, 0)
+        foot.pack_start(ui.button("Close", "btn", app.pop_layer), False, False, 0)
+        dlg.pack_start(foot, False, False, 0)
+        addr.connect("activate", lambda *_: add_uri(addr.get_text().strip(), ""))
+
+        def say(text, bad=False):
+            msg.set_markup('<span foreground="%s">%s</span>' % ("#C53030" if bad else "#5A606B",
+                                                                 GLib.markup_escape_text(text)))
+
+        def add_uri(uri, title):
+            if not uri:
+                return
+            if "://" not in uri:
+                uri = "ipp://" + uri + "/ipp/print"
+            taken = {p["name"] for p in system.printers()}
+            label = title or uri.split("://", 1)[1].split("/", 1)[0]
+            name = system.printer_name(label, taken)
+            listing.set_sensitive(False)
+            by.set_sensitive(False)
+            say(f"Adding {label}…")
+
+            def done(res):
+                ok, message = res
+                if _gone(dlg):
+                    return
+                listing.set_sensitive(True)
+                by.set_sensitive(True)
+                if ok:
+                    app.pop_layer()
+                    refresh()
+                else:
+                    say(message, bad=True)
+            system.in_background(lambda: system.printer_add(name, uri, title), done)
+
+        def show_found(res):
+            if _gone(dlg):
+                return
+            ok, items = res
+            again.set_sensitive(True)
+            if not ok:
+                state("Couldn’t look for printers", items)
+                return
+            if not items:
+                state("No printers found", "Check that the printer is on and connected, or add it by its address.")
+                return
+            for ch in listing.get_children():
+                listing.remove(ch)
+            here = system.printers()
+            # the same address, or the same name (one added by its address is found under its network name)
+            have = {p["uri"] for p in here} | {p["info"] for p in here}
+            for f in items[:8]:
+                r = Gtk.Box(spacing=12)
+                col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, valign=Gtk.Align.CENTER)
+                col.pack_start(ui.label(f["name"], "body"), False, False, 0)
+                if f["uri"] in have or f["name"] in have:
+                    why = "Already added"
+                elif f["driverless"]:
+                    why = "USB" if f["kind"] == "usb" else "Network"
+                else:
+                    why = "Needs a driver LiteLink doesn’t include"
+                col.pack_start(ui.label(why, "muted small"), False, False, 0)
+                r.pack_start(col, True, True, 0)
+                b = ui.button("Add", "btn", lambda u=f["uri"], n=f["name"]: add_uri(u, n))
+                b.set_valign(Gtk.Align.CENTER)
+                b.set_sensitive(f["driverless"] and f["uri"] not in have and f["name"] not in have)
+                r.pack_start(b, False, False, 0)
+                listing.pack_start(r, False, False, 0)
+            listing.show_all()
+
+        def search():
+            again.set_sensitive(False)
+            say("")
+            state("Looking for printers…", "", busy=True)
+            system.in_background(system.printer_find, show_found)
+
+        app.push_layer(outer, "light")
+        search()

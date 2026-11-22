@@ -81,6 +81,9 @@ freerdp3-x11
 # TODO: move into its own image module, installed only when LiteOS / Web kiosk is ticked.
 chromium
 fonts-liberation
+# The public certificate authorities for everything but Chromium (which has its own):
+# the device bridge's uploads to an https LiteOS, and Settings › Certificates' system store
+ca-certificates
 # Compressed swap in RAM (zram, lz4, half of RAM by default): Chromium runs a
 # process per site, and 2 GB devices like the Wyse 3040 need the headroom
 zram-tools
