@@ -185,6 +185,11 @@ PROTOCOLS = [
     ("webkiosk", "Web kiosk", "LiteOS or any website, full screen. Adds a browser engine (Chromium).", True),
 ]
 
+# Device features: hardware support installed as its own image module, not a connection type.
+DEVICES = [
+    ("printers", "Printers", "Print to USB and network printers that work without a driver. Adds a print system.", True),
+]
+
 # Web kiosk needs about 2 GB of memory. A "2 GB" device reports a little less
 # (the kernel and graphics keep some), so warn below 1.75 GiB.
 WEB_MIN_KB = 1835008
@@ -389,7 +394,7 @@ class Installer:
         box.pack_start(head, False, False, 0)
 
         def recount():
-            count.set_text(f"{len(self.features)} of {len(PROTOCOLS)} selected")
+            count.set_text(f"{len(self.features & {k for k, *_ in PROTOCOLS})} of {len(PROTOCOLS)} selected")
         protos = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         for i, (key, title, sub, available) in enumerate(PROTOCOLS):
             if key == "webkiosk" and not system.web_engine():
@@ -424,6 +429,17 @@ class Installer:
                     warn.set_visible(chk.get_active())
         recount()
         box.pack_start(protos, False, False, 0)
+
+        # Devices: each one is its own image module, installed only when ticked
+        box.pack_start(ui.label("DEVICES", "wizard-sec"), False, False, 0)
+        devs = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        for i, (key, title, sub, available) in enumerate(DEVICES):
+            if key == "printers" and not system.print_engine():
+                available = False          # this USB stick has no print module
+            chk = Gtk.CheckButton(active=key in self.features)
+            chk.connect("toggled", lambda c, k=key: (self.features.add if c.get_active() else self.features.discard)(k))
+            self._row(devs, title, sub, chk, sep=i < len(DEVICES) - 1, enabled=available)
+        box.pack_start(devs, False, False, 0)
         self._buttons(ui.button("Back", "btn", self._step_time),
                       ui.button("Next", "btn btn-primary", self._step_disk))
         self._show("features")
@@ -543,7 +559,7 @@ class Installer:
             bar.set_fraction(pct / 100)
             status.set_text(f"{text}…" if pct < 100 else text)
 
-        feats = ",".join(k for k, *_ in PROTOCOLS if k in self.features)
+        feats = ",".join(k for k, *_ in PROTOCOLS + DEVICES if k in self.features)
         system.storage_run(["install", self.disk["path"], "--mode", self.mode, "--features", feats,
                             "--maintenance", "on" if self.maintenance else "off"], prog, self._step_done,
                            on_log=self.log.append)

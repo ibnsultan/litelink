@@ -1,0 +1,152 @@
+#!/usr/bin/python3
+"""Printing as its own image module (live/print.squashfs), part 1 of 2.
+
+The printing packages (CUPS, cups-filters, ipp-usb, Avahi) are installed in the
+chroot like everything else. This hook, which runs last in the chroot, moves the
+files that only printing uses into /var/lib/litelink-modules/print, at their own
+paths below it; config/rootfs/excludes keeps that folder out of the base image,
+and hooks/normal/0910-litelink-print-module.hook.binary packs it into
+live/print.squashfs. live-boot stacks every *.squashfs in /live, so a device
+with the module has printing and one without has none of it: no services, no
+files, nothing listed.
+
+What moves: the printing packages and every package they pulled in that nothing
+else in the image needs (Ghostscript, Poppler, qpdf...). A library the rest of
+the image uses too (libcups2t64, which FreeRDP links) stays in the base. Only
+files and links move, never directories, and never a path another package owns.
+The services' enable links (/etc/systemd/system/*.wants, /etc/rc?.d) move with
+their units. The dpkg database stays in the base, so on a device without the
+module dpkg thinks these packages are installed with their files missing.
+"""
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+# cups itself carries cups-deviced / cups-driverd (lpinfo, the printer search) and the usb, dnssd and
+# socket backends; cups-daemon alone starts but can't look for printers
+ROOTS = ["cups", "cups-daemon", "cups-client", "cups-filters", "ipp-usb", "avahi-daemon", "libnss-mdns"]
+DEST = "/var/lib/litelink-modules/print"
+
+
+def installed():
+    """{package: [dependency names (each alternative counts)]} for installed packages, plus provides."""
+    out = subprocess.run(["dpkg-query", "-W", "-f", "${Package}\t${Status}\t${Pre-Depends}, ${Depends}\t${Provides}\n"],
+                         capture_output=True, text=True, check=True).stdout
+    deps, provides = {}, {}
+    for line in out.splitlines():
+        name, status, dep, prov = (line.split("\t") + ["", "", ""])[:4]
+        if not status.endswith(" installed"):
+            continue
+        names = []
+        for part in dep.split(","):
+            for alt in part.split("|"):
+                n = re.sub(r"[\s(:].*", "", alt.strip())
+                if n:
+                    names.append(n)
+        deps[name] = names
+        for p in prov.split(","):
+            p = re.sub(r"[\s(].*", "", p.strip())
+            if p:
+                provides.setdefault(p, []).append(name)
+    return deps, provides
+
+
+def reach(start, deps, provides):
+    """Every installed package reachable from start by dependencies."""
+    seen, todo = set(), list(start)
+    while todo:
+        p = todo.pop()
+        for q in ([p] if p in deps else provides.get(p, [])):
+            if q in seen:
+                continue
+            seen.add(q)
+            todo.extend(deps[q])
+    return seen
+
+
+def files_of(pkgs):
+    out = subprocess.run(["dpkg", "-L"] + sorted(pkgs), capture_output=True, text=True).stdout
+    return {line for line in out.splitlines() if line.startswith("/")}
+
+
+def configure_cups():
+    """LiteLink's CUPS settings, made before cupsd.conf moves into the module:
+    write printer changes at once (litelink-print saves printers.conf to the settings
+    partition right after each change; CUPS normally writes it up to 30 s later),
+    listen on this device only, and share nothing."""
+    path = "/etc/cups/cupsd.conf"
+    text = open(path).read()
+    text = re.sub(r"(?m)^\s*(DirtyCleanInterval|Browsing)\s.*\n", "", text)
+    text = re.sub(r"(?m)^\s*Port\s+631\s*$", "Listen localhost:631", text)
+    text = "# LiteLink: write changes at once, share no printers (hooks/normal/9000-litelink-print-module)\n" \
+           "DirtyCleanInterval 0\nBrowsing No\n" + text
+    with open(path, "w") as f:
+        f.write(text)
+
+
+def main():
+    missing = [r for r in ROOTS if subprocess.run(["dpkg", "-s", r], capture_output=True).returncode]
+    if missing:
+        print("print module: not all printing packages installed (%s), skipped" % ", ".join(missing))
+        return
+    configure_cups()
+    deps, provides = installed()
+    candidates = reach(ROOTS, deps, provides)
+    # what the rest of the image needs, starting from every package printing didn't bring in
+    base = reach([p for p in deps if p not in candidates], deps, provides)
+    module = sorted(candidates - base)
+    keep = files_of(set(deps) - set(module))
+
+    moved, dirs = 0, set()
+    for path in sorted(files_of(module) - keep):
+        if not os.path.lexists(path) or (os.path.isdir(path) and not os.path.islink(path)):
+            continue
+        target = DEST + path
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.move(path, target)
+        dirs.add(os.path.dirname(path))
+        moved += 1
+
+    # links the packages' scripts made next to moved files, to moved files: owned by none, so move them
+    # too. cups hard-links the backends it enables (/usr/lib/cups/backend/usb = backend-available/usb);
+    # a symbolic link left pointing at a moved file goes the same way
+    inodes = set()
+    for dirpath, _dirs, names in os.walk(DEST):
+        for n in names:
+            st = os.lstat(os.path.join(dirpath, n))
+            if st.st_nlink > 1:
+                inodes.add((st.st_dev, st.st_ino))
+    for d in sorted(dirs):
+        for n in os.listdir(d) if os.path.isdir(d) else []:
+            p = os.path.join(d, n)
+            st = os.lstat(p)
+            hard = not os.path.islink(p) and (st.st_dev, st.st_ino) in inodes
+            if hard or (os.path.islink(p) and not os.path.exists(p)):
+                to = p if hard else os.path.normpath(os.path.join(d, os.readlink(p)))
+                if hard or os.path.lexists(DEST + to):
+                    os.makedirs(os.path.dirname(DEST + p), exist_ok=True)
+                    shutil.move(p, DEST + p)
+                    moved += 1
+
+    # enable links of the units that moved (made by the packages' scripts, owned by none)
+    units = {os.path.basename(p) for p in files_of(module) if re.search(r"/systemd/system/[^/]+$|/init\.d/[^/]+$", p)}
+    for top in ("/etc/systemd/system", "/etc/rc0.d", "/etc/rc1.d", "/etc/rc2.d", "/etc/rc3.d", "/etc/rc4.d",
+                "/etc/rc5.d", "/etc/rc6.d", "/etc/rcS.d"):
+        for dirpath, _dirs, names in os.walk(top):
+            for n in names:
+                p = os.path.join(dirpath, n)
+                if os.path.islink(p) and os.path.basename(os.readlink(p)) in units:
+                    os.makedirs(os.path.dirname(DEST + p), exist_ok=True)
+                    shutil.move(p, DEST + p)
+                    moved += 1
+
+    with open(os.path.join(DEST, "packages.txt") if os.path.isdir(DEST) else os.devnull, "w") as f:
+        f.write("\n".join(module) + "\n")
+    print("print module: %d packages, %d files moved to %s" % (len(module), moved, DEST))
+    print("print module: " + " ".join(module))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

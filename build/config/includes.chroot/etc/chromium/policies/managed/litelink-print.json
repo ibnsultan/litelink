@@ -1,0 +1,4 @@
+{
+ "PrintingEnabled": false,
+ "PrinterTypeDenyList": ["pdf", "extension", "privet", "cloud"]
+}

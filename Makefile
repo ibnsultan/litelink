@@ -45,6 +45,7 @@ sizes:
 	@echo "rootfs:  $$(du -sh --exclude=proc --exclude=sys --exclude=dev $(BUILD)/chroot 2>/dev/null | cut -f1)"
 	@echo "squash:  $$(du -h $(BUILD)/binary/live/filesystem.squashfs | cut -f1)"
 	@[ -e $(BUILD)/binary/live/web.squashfs ] && echo "web:     $$(du -h $(BUILD)/binary/live/web.squashfs | cut -f1) (module, installed with Web kiosk)" || true
+	@[ -e $(BUILD)/binary/live/print.squashfs ] && echo "print:   $$(du -h $(BUILD)/binary/live/print.squashfs | cut -f1) (module, installed with Printers)" || true
 
 clean:
 	cd $(BUILD) && lb clean

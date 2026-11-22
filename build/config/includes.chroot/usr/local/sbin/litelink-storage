@@ -4,7 +4,7 @@
   litelink-storage status            JSON: where we booted from, persistence state
   litelink-storage disks             JSON: internal disks LiteLink can be installed on
   litelink-storage usb-setup         add a litelink-usb settings partition to the boot USB stick
-  litelink-storage install DISK [--mode standard|kiosk] [--features rdp,vnc,workspaces,webkiosk]
+  litelink-storage install DISK [--mode standard|kiosk] [--features rdp,vnc,workspaces,webkiosk,printers]
                                 [--maintenance on|off]
                                      install LiteLink on DISK (erases it); choices go to
                                      state/install.json (RDP always included)
@@ -264,9 +264,9 @@ def cmd_usb_setup():
 
 
 MODES = ("standard", "kiosk")
-FEATURES = ("rdp", "vnc", "workspaces", "webkiosk")
+FEATURES = ("rdp", "vnc", "workspaces", "webkiosk", "printers")
 # Features installed as their own image module (in /live next to filesystem.squashfs)
-MODULES = {"webkiosk": "web.squashfs"}
+MODULES = {"webkiosk": "web.squashfs", "printers": "print.squashfs"}
 
 
 def parse_install_args(args):
@@ -349,8 +349,8 @@ def cmd_install(disk, opts=None):
 
     # The OS image: kernel, initrd and the compressed root filesystem, plus the image
     # modules for what was ticked in the installer (live-boot stacks every *.squashfs
-    # in /live). Web kiosk: the browser engine, web.squashfs. Not ticked: not copied,
-    # so the device carries no browser engine.
+    # in /live). Web kiosk: the browser engine, web.squashfs; Printers: the print system,
+    # print.squashfs. Not ticked: not copied, so the device carries none of it.
     src = os.path.join(MEDIUM, "live")
     files = [f for f in ("vmlinuz", "initrd.img", "filesystem.squashfs") if os.path.exists(os.path.join(src, f))]
     if len(files) != 3:

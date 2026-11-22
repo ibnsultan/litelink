@@ -111,5 +111,17 @@ gir1.2-gtk-3.0
 # Text is pre-rendered to PNG (Inter), so plymouth-label isn't needed.
 plymouth
 
+# Printing (H8): driverless printers (IPP Everywhere / AirPrint) over USB and the
+# network. Packed into its own image module, live/print.squashfs, by
+# hooks/normal/9000-litelink-print-module.hook.chroot and
+# 0910-litelink-print-module.hook.binary; installed only when Printers is ticked.
+cups
+cups-daemon
+cups-client
+cups-filters
+ipp-usb
+avahi-daemon
+libnss-mdns
+
 # Phase 1 debugging only: remove before release
 xterm

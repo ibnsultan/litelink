@@ -1,0 +1,292 @@
+#!/usr/bin/python3
+"""LiteLink OS: printer setup for Settings › Printers (runs as root through sudo).
+
+Printing is the print image module (live/print.squashfs: CUPS, cups-filters,
+ipp-usb, Avahi). Only driverless printers are set up (IPP Everywhere / AirPrint):
+CUPS builds each one's description from the printer itself (lpadmin -m everywhere),
+so no driver is installed. Plan: docs/plans/device-bridge.md, section 8.
+
+  litelink-print find                  -> JSON [{uri, name, kind, driverless}]   printers found now
+  litelink-print add NAME URI [INFO]   -> JSON {name, info}                      set up (INFO: the name shown;
+                                                                                 without it, the printer's model), saved
+  litelink-print remove NAME           -> removed, saved
+  litelink-print default NAME          -> the default printer, saved
+  litelink-print last                  -> JSON {name}: the printer used last becomes the default
+                                          (the default is always the one used last; no setting)
+  litelink-print test NAME             -> JSON {job}                             CUPS's test page
+  litelink-print restore               -> put the saved printers back (before cupsd starts)
+
+Printers are kept across restarts in /var/lib/litelink/cups (on the settings
+partition): CUPS's printers.conf and each printer's PPD, copied after every change
+and put back by restore (cups.service runs it first). Only those files: the rest of
+/etc/cups comes from the image, so an update's CUPS settings always apply.
+Errors are sentences on stderr, exit status 1.
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import urllib.parse
+
+CUPS = "/etc/cups"
+SAVED = "/var/lib/litelink/cups"
+TESTPAGE = "/usr/share/cups/data/testprint"
+
+
+class Failed(Exception):
+    pass
+
+
+def run(*cmd, timeout=60):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        raise Failed("Printing isn't installed on this device.")
+    except subprocess.TimeoutExpired:
+        raise Failed("The printer didn't answer in time.")
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
+def valid_name(name):
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", name or ""):
+        raise Failed("That printer name isn't valid.")
+    return name
+
+
+def valid_uri(uri):
+    if not re.fullmatch(r"(ipp|ipps|dnssd|usb)://[^\s'\"\\]{1,400}", uri or ""):
+        raise Failed("That printer address isn't valid. Use ipp:// or ipps:// followed by the printer's name or address.")
+    return uri
+
+
+def find():
+    """Printers found now: network ones by mDNS (dnssd, ipp, ipps; USB printers through
+    ipp-usb show here too) and plain USB ones (usb, which need a driver LiteLink lacks)."""
+    rc, out = run("lpinfo", "-l", "-v", "--include-schemes", "dnssd,usb", timeout=30)
+    if rc:
+        raise Failed("Couldn't look for printers.")
+    found, cur = [], None
+    for line in out.splitlines():
+        m = re.match(r"Device: uri = (\S+)", line.strip())
+        if m:
+            cur = {"uri": m.group(1), "name": "", "make": "", "ids": ""}
+            found.append(cur)
+            continue
+        m = re.match(r"(info|make-and-model|device-id) = (.*)", line.strip())
+        if cur and m:
+            cur[{"info": "name", "make-and-model": "make", "device-id": "ids"}[m.group(1)]] = m.group(2).strip()
+    result, seen = [], set()
+    for f in found:
+        uri = f["uri"]
+        if not re.match(r"[a-z]+://[^/]", uri):
+            continue                       # a kind of connection (ipp, socket, lpd...), not a printer
+        driverless = uri.startswith("dnssd://") or uri.startswith("ipp")
+        # the name the printer announces on the network ("Office Printer._ipps._tcp.local"), else its own
+        service = re.match(r"[a-z]+://([^/]+?)\._ipps?\._tcp", uri)
+        name = (urllib.parse.unquote(service.group(1)) if service else "") or f["name"] or f["make"] or uri
+        # a USB printer that ipp-usb serves shows twice: keep the driverless one
+        if name in seen and not driverless:
+            continue
+        seen.add(name)
+        kind = "usb" if uri.startswith("usb://") or re.match(r"ipps?://(localhost|127\.0\.0\.1):600\d\d/", uri) else "network"
+        result.append({"uri": uri, "name": name, "kind": kind, "driverless": driverless})
+    result.sort(key=lambda x: (not x["driverless"], x["name"].lower()))
+    return result
+
+
+def save():
+    """Copy what describes the printers to the settings partition."""
+    os.makedirs(os.path.join(SAVED, "ppd"), exist_ok=True)
+    src = os.path.join(CUPS, "printers.conf")
+    if os.path.exists(src):
+        shutil.copy2(src, os.path.join(SAVED, "printers.conf"))
+    elif os.path.exists(os.path.join(SAVED, "printers.conf")):
+        os.remove(os.path.join(SAVED, "printers.conf"))
+    keep = set()
+    for name in os.listdir(os.path.join(CUPS, "ppd")) if os.path.isdir(os.path.join(CUPS, "ppd")) else []:
+        if name.endswith(".ppd"):
+            shutil.copy2(os.path.join(CUPS, "ppd", name), os.path.join(SAVED, "ppd", name))
+            keep.add(name)
+    for name in os.listdir(os.path.join(SAVED, "ppd")):
+        if name not in keep:
+            os.remove(os.path.join(SAVED, "ppd", name))
+    rc, out = run("lpstat", "-d")
+    m = re.search(r"system default destination: (\S+)", out)
+    with open(os.path.join(SAVED, "default"), "w") as f:
+        f.write(m.group(1) if m else "")
+
+
+def restore():
+    """Before cupsd starts: the saved printers back in /etc/cups (nothing saved: nothing to do)."""
+    if not os.path.isdir(SAVED):
+        return
+    if os.path.exists(os.path.join(SAVED, "printers.conf")):
+        os.makedirs(os.path.join(CUPS, "ppd"), exist_ok=True)
+        shutil.copy2(os.path.join(SAVED, "printers.conf"), os.path.join(CUPS, "printers.conf"))
+        os.chmod(os.path.join(CUPS, "printers.conf"), 0o600)
+        for name in os.listdir(os.path.join(SAVED, "ppd")) if os.path.isdir(os.path.join(SAVED, "ppd")) else []:
+            shutil.copy2(os.path.join(SAVED, "ppd", name), os.path.join(CUPS, "ppd", name))
+
+
+def add(name, uri, info=""):
+    name, uri = valid_name(name), valid_uri(uri)
+    if uri.startswith("usb://"):
+        raise Failed("This printer needs a driver LiteLink doesn't include.")
+    info = re.sub(r"[\x00-\x1f\x7f]", "", info or "")[:127]    # what Settings shows
+    if any(u == uri and q != name for q, u in re.findall(r"(?m)^device for (\S+): (\S+)", run("lpstat", "-v")[1])):
+        raise Failed("That printer is already set up.")
+    if not info:
+        # added by address: named as the printer calls itself, the queue too (Chromium's print
+        # dialog shows the queue's name)
+        info = printer_info(uri)
+        if info:
+            name = queue_name(info)
+    existed = run("lpstat", "-p", name)[0] == 0
+    try:
+        rc, out = run("lpadmin", "-p", name, "-D", info or name, "-v", uri, "-m", "everywhere", "-E",
+                      "-o", "printer-is-shared=false", timeout=90)
+    except Failed:
+        rc, out = 1, "timed out"
+    if rc:
+        if not existed:
+            run("lpadmin", "-x", name)    # lpadmin may have left a half-made queue
+        # lpadmin's message doesn't always say why ("lpadmin: Success" has been seen): see whether
+        # anything answers at the address before blaming a missing driver
+        if (re.search(r"(?i)unable to (connect|open)|not responding|no route|timed out|could not|host is down", out)
+                or not answers(uri)):
+            raise Failed("The printer couldn't be reached. Check that it's on and connected.")
+        raise Failed("This printer needs a driver LiteLink doesn't include.")
+    if not info:                          # it didn't say its name: its make and model
+        info = model(name) or name
+        run("lpadmin", "-p", name, "-D", info)
+    rc, out = run("lpstat", "-d")
+    if "no system default" in out:
+        run("lpadmin", "-d", name)        # the first printer becomes the default
+    save()
+    return {"name": name, "info": info}
+
+
+def answers(uri):
+    """Something listens at a network printer's address (dnssd and USB addresses: assumed so)."""
+    import socket
+    import urllib.parse
+    p = urllib.parse.urlsplit(uri)
+    if p.scheme not in ("ipp", "ipps", "http", "https") or not p.hostname:
+        return True
+    try:
+        port = p.port or {"http": 80, "https": 443}.get(p.scheme, 631)
+        with socket.create_connection((p.hostname, port), timeout=5):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
+def clean(text):
+    return re.sub(r"[\x00-\x1f\x7f]", "", text).strip()[:127]
+
+
+def printer_info(uri):
+    """What the printer calls itself (its printer-info, "HP LaserJet M110w [12AB34]"), or ""."""
+    try:
+        rc, out = run("ipptool", "-T", "10", "-tv", uri, "get-printer-attributes.test", timeout=20)
+    except Failed:
+        return ""
+    m = re.search(r"(?m)^\s*printer-info \([^)]*\) = (.+)$", out) if rc == 0 else None
+    return clean(m.group(1)) if m else ""
+
+
+def model(name):
+    """The printer's make and model, as it told CUPS when it was added (lpadmin -m everywhere)."""
+    rc, out = run("lpoptions", "-p", name)
+    m = re.search(r"printer-make-and-model=(?:'([^']*)'|((?:\\.|\S)+))", out)
+    text = (m.group(1) or re.sub(r"\\(.)", r"\1", m.group(2) or "")) if m else ""
+    return clean(re.sub(r"\s+-\s+IPP Everywhere$", "", text))
+
+
+def queue_name(info):
+    """A queue name from a printer's name (letters, digits, _ . -), not one already set up."""
+    base = re.sub(r"[^A-Za-z0-9_.-]+", "_", info).strip("_.-")[:56] or "Printer"
+    taken = set(re.findall(r"(?m)^printer (\S+)", run("lpstat", "-p")[1]))
+    name, n = base, 2
+    while name in taken:
+        name, n = "%s_%d" % (base, n), n + 1
+    return name
+
+
+def remove(name):
+    rc, out = run("lpadmin", "-x", valid_name(name))
+    if rc:
+        raise Failed("That printer isn't set up on this device.")
+    if "no system default" in run("lpstat", "-d")[1]:
+        last()                            # the default went with it: the one used last of the rest
+        if "no system default" in run("lpstat", "-d")[1]:
+            left = re.findall(r"(?m)^printer (\S+)", run("lpstat", "-p")[1])
+            if left:
+                run("lpadmin", "-d", left[0])
+    save()
+
+
+def default(name):
+    rc, out = run("lpadmin", "-d", valid_name(name))
+    if rc:
+        raise Failed("That printer isn't set up on this device.")
+    save()
+
+
+def test(name):
+    rc, out = run("lp", "-d", valid_name(name), "-t", "LiteLink test page", TESTPAGE)
+    m = re.search(r"request id is (\S+)", out)
+    if rc or not m:
+        raise Failed("The test page couldn't be sent to the printer.")
+    default(name)                         # the printer used last is the default
+    return {"job": m.group(1)}
+
+
+def last():
+    """The default becomes the printer used last: the one with the newest job CUPS knows of
+    (LiteOS through the device bridge, Chromium's own print dialog, a test page)."""
+    rc, out = run("lpstat", "-W", "all", "-o")
+    jobs = [(int(m.group(2)), m.group(1)) for m in re.finditer(r"(?m)^(\S+)-(\d+)\s", out)]
+    here = set(re.findall(r"(?m)^printer (\S+)", run("lpstat", "-p")[1]))
+    for _n, printer in sorted(jobs, reverse=True):
+        if printer in here:
+            rc, out = run("lpstat", "-d")
+            if not out.strip().endswith(": " + printer):
+                default(printer)
+            return {"name": printer}
+    return {}
+
+
+def main(argv):
+    if not argv:
+        print(__doc__, file=sys.stderr)
+        return 2
+    cmd, args = argv[0], argv[1:]
+    try:
+        if cmd == "find" and not args:
+            print(json.dumps(find()))
+        elif cmd == "add" and len(args) in (2, 3):
+            print(json.dumps(add(*args)))
+        elif cmd == "remove" and len(args) == 1:
+            remove(args[0])
+        elif cmd == "default" and len(args) == 1:
+            default(args[0])
+        elif cmd == "test" and len(args) == 1:
+            print(json.dumps(test(args[0])))
+        elif cmd == "last" and not args:
+            print(json.dumps(last()))
+        elif cmd == "restore" and not args:
+            restore()
+        else:
+            print(__doc__, file=sys.stderr)
+            return 2
+    except Failed as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

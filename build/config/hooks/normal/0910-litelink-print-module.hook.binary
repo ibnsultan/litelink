@@ -1,0 +1,21 @@
+#!/bin/sh
+# Printing as its own image module: live/print.squashfs, part 2 of 2.
+#
+# hooks/normal/9000-litelink-print-module.hook.chroot moved the files only
+# printing uses to chroot/var/lib/litelink-modules/print (left out of the base
+# image by config/rootfs/excludes). This hook, which runs right after the base
+# image is made (cwd: binary/), packs that folder into live/print.squashfs:
+#   - the USB stick has it: printing works when running from it;
+#   - the installer copies it only when Printers is ticked, so devices installed
+#     without it carry no print system.
+set -e
+
+SRC=../chroot/var/lib/litelink-modules/print
+if [ ! -d "$SRC" ]; then
+    echo "print module: nothing moved in the chroot, skipped"
+    exit 0
+fi
+
+# Same compression as the base image (live-build's default: mksquashfs's own)
+mksquashfs "$SRC" live/print.squashfs -noappend -no-progress -e packages.txt
+echo "print module: $(du -h live/print.squashfs | cut -f1)"
