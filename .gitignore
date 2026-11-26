@@ -1,3 +1,5 @@
+/.*/
+
 # live-build output and caches (never commit)
 build/.build/
 build/chroot/
