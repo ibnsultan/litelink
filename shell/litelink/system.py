@@ -202,28 +202,80 @@ def wifi_current():
     return ""
 
 
-def wifi_connect(ssid, password="", auto=True):
-    """Join a network (a saved one uses its stored password when none is given).
-    auto: connect to it by itself from now on. -> (ok, reason), reason one of
-    '' | 'password' | 'notfound' | 'timeout' | 'failed'."""
-    cmd = ["sudo", "-n", "nmcli", "--wait", "30", "device", "wifi", "connect", ssid]
-    if password:
-        cmd += ["password", password]
+def _wifi_profiles(ssid):
+    """UUIDs of the saved Wi-Fi connections for this network (matched on the
+    network name itself, not the connection's name, which may be 'Home 1')."""
+    rc, out = run(["nmcli", "-t", "-f", "UUID,TYPE", "connection", "show"])
+    found = []
+    for line in out.splitlines():
+        uuid, _, typ = line.partition(":")
+        if typ != "802-11-wireless":
+            continue
+        rc, name = run(["nmcli", "-g", "802-11-wireless.ssid", "connection", "show", uuid])
+        if rc == 0 and name.replace("\\:", ":") == ssid:
+            found.append(uuid)
+    return found
+
+
+def _nmcli_join(cmd):
+    """Run an nmcli connect/up command. -> (ok, reason) as for wifi_connect."""
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
+        p = subprocess.run(["sudo", "-n", "nmcli", "--wait", "30"] + cmd,
+                           capture_output=True, text=True, timeout=40)
     except subprocess.TimeoutExpired:
         return False, "timeout"
     except OSError:
         return False, "failed"
-    if p.returncode != 0:
-        err = (p.stderr + p.stdout).lower()
-        if "secrets were required" in err or "psk" in err or "password" in err or "802-1x" in err:
-            return False, "password"
-        if "no network with ssid" in err:
-            return False, "notfound"
-        if "timeout" in err or "timed out" in err:
-            return False, "timeout"
-        return False, "failed"
+    if p.returncode == 0:
+        return True, ""
+    err = (p.stderr + p.stdout).lower()
+    if "secrets were required" in err or "psk" in err or "password" in err or "802-1x" in err:
+        return False, "password"
+    if "no network with ssid" in err:
+        return False, "notfound"
+    if "timeout" in err or "timed out" in err:
+        return False, "timeout"
+    return False, "failed"
+
+
+def _set_wifi_password(uuid, password):
+    """Put a new password into a saved Wi-Fi connection. False when it isn't
+    one that takes a plain password (e.g. 802.1X enterprise)."""
+    rc, mgmt = run(["nmcli", "-g", "802-11-wireless-security.key-mgmt", "connection", "show", uuid])
+    mgmt = mgmt.strip()
+    if mgmt in ("wpa-psk", "sae"):
+        args = ["802-11-wireless-security.psk", password, "802-11-wireless-security.psk-flags", "0"]
+    elif mgmt == "none":                                   # WEP
+        args = ["802-11-wireless-security.wep-key0", password,
+                "802-11-wireless-security.wep-key-flags", "0"]
+    else:
+        return False
+    return run(["nmcli", "connection", "modify", uuid, *args], sudo=True)[0] == 0
+
+
+def wifi_connect(ssid, password="", auto=True):
+    """Join a network (a saved one uses its stored password when none is given).
+    auto: connect to it by itself from now on. -> (ok, reason), reason one of
+    '' | 'password' | 'notfound' | 'timeout' | 'failed'.
+
+    A typed password always replaces the saved one: `nmcli device wifi connect`
+    reuses an existing connection for the network and ignores the password it is
+    given, so a wrong password saved once would otherwise fail every later try.
+    A first join that fails leaves no saved connection behind."""
+    before = _wifi_profiles(ssid)
+    if password and before and _set_wifi_password(before[0], password):
+        ok, why = _nmcli_join(["connection", "up", before[0]])
+    else:
+        cmd = ["device", "wifi", "connect", ssid]
+        if password:
+            cmd += ["password", password]
+        ok, why = _nmcli_join(cmd)
+    if not ok:
+        # Drop what this attempt created, so a wrong password isn't kept as a saved network
+        for uuid in _wifi_profiles(ssid):
+            if uuid not in before:
+                run(["nmcli", "connection", "delete", uuid], sudo=True)
+        return False, why
     rc, out = run(["nmcli", "-t", "-f", "UUID,TYPE", "connection", "show", "--active"])
     for line in out.splitlines():
         uuid, _, typ = line.partition(":")
